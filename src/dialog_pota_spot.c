@@ -3,10 +3,10 @@
  *
  *  Xiegu X6100 LVGL GUI
  *
- *  POTA self-spot dialog
+ *  POTA self-spot dialog — WiFi path
  *
  *  Flow:
- *    1. Park # input     → [SPOT] [CANCEL]
+ *    1. Park # input     → [Park #] [SPOT] [CANCEL]
  *    2. Blocking POST    → lv_refr_now() shows "Posting..." before curl call
  *    3. Result screen    → success or failure + [OK]
  *
@@ -30,7 +30,21 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ─── widgets ────────────────────────────────────────────────────────────── */
+/* ─── forward declarations ──────────────────────────────────────────────── */
+
+static void construct_cb(lv_obj_t *parent);
+static void destruct_cb(void);
+static void key_cb(lv_event_t *e);
+
+static void btn_enter_park_cb(struct button_item_t *btn);
+static void btn_spot_cb(struct button_item_t *btn);
+static void btn_cancel_cb(struct button_item_t *btn);
+static void btn_ok_cb(struct button_item_t *btn);
+
+static bool keyboard_ok_cb(void);
+static bool keyboard_cancel_cb(void);
+
+/* ─── state ─────────────────────────────────────────────────────────────── */
 
 static lv_obj_t *cont_input;
 static lv_obj_t *cont_progress;
@@ -44,17 +58,42 @@ static lv_obj_t *label_result_detail;
 
 static char park_buf[16];
 
-/* ─── helpers ────────────────────────────────────────────────────────────── */
+/* ─── button items + pages ──────────────────────────────────────────────── */
+
+static button_item_t btn_enter  = { .type = BTN_TEXT, .label = "Park #", .press = btn_enter_park_cb };
+static button_item_t btn_spot   = { .type = BTN_TEXT, .label = "SPOT",   .press = btn_spot_cb       };
+static button_item_t btn_cancel = { .type = BTN_TEXT, .label = "CANCEL", .press = btn_cancel_cb     };
+static button_item_t btn_ok     = { .type = BTN_TEXT, .label = "OK",     .press = btn_ok_cb         };
+
+static buttons_page_t page_input  = {{ &btn_enter, &btn_spot, &btn_cancel }};
+static buttons_page_t page_result = {{ &btn_ok }};
+
+/* ─── dialog descriptor ─────────────────────────────────────────────────── */
+
+static dialog_t dialog = {
+    .run          = false,
+    .construct_cb = construct_cb,
+    .destruct_cb  = destruct_cb,
+    .audio_cb     = NULL,
+    .rotary_cb    = NULL,
+    .key_cb       = key_cb,
+};
+
+dialog_t *dialog_pota_spot = &dialog;
+
+/* ─── helpers ───────────────────────────────────────────────────────────── */
 
 static const char *mode_str(void) {
     switch ((x6100_mode_t)subject_get_int(cfg_cur.mode)) {
-        case x6100_mode_lsb:  return "SSB";
-        case x6100_mode_usb:  return "SSB";
-        case x6100_mode_cw:   return "CW";
-        case x6100_mode_cwr:  return "CW";
-        case x6100_mode_am:   return "AM";
-        case x6100_mode_nfm:  return "FM";
-        default:              return "SSB";
+        case x6100_mode_lsb:      return "SSB";
+        case x6100_mode_usb:      return "SSB";
+        case x6100_mode_lsb_dig:  return "DATA";
+        case x6100_mode_usb_dig:  return "DATA";
+        case x6100_mode_cw:       return "CW";
+        case x6100_mode_cwr:      return "CW";
+        case x6100_mode_am:       return "AM";
+        case x6100_mode_nfm:      return "FM";
+        default:                  return "SSB";
     }
 }
 
@@ -68,7 +107,7 @@ static void show_only(lv_obj_t *visible) {
     }
 }
 
-/* ─── button callbacks ───────────────────────────────────────────────────── */
+/* ─── button callbacks ──────────────────────────────────────────────────── */
 
 static void btn_spot_cb(struct button_item_t *btn) {
     (void)btn;
@@ -81,21 +120,19 @@ static void btn_spot_cb(struct button_item_t *btn) {
     int32_t     freq_hz = subject_get_int(cfg_cur.fg_freq);
     const char *mode    = mode_str();
 
-    /* ── Show "Posting..." and flush the display before blocking ── */
+    /* Show "Posting..." and flush the display before blocking */
     show_only(cont_progress);
-    char posting_buf[48];
+    char posting_buf[64];
     snprintf(posting_buf, sizeof(posting_buf),
              "Posting %s  %.3f MHz  %s",
              park_buf, freq_hz / 1e6, mode);
     lv_label_set_text(label_posting, posting_buf);
-
-    /* Force an immediate display refresh so the user sees "Posting..." */
     lv_refr_now(lv_disp_get_default());
 
-    /* ── Blocking HTTP POST (typically < 1 second on good WiFi) ── */
+    /* Blocking HTTP POST (typically < 1 second on good WiFi) */
     bool ok = pota_spot_wifi(park_buf, freq_hz, mode, NULL);
 
-    /* ── Show result ── */
+    /* Show result */
     if (ok) {
         char res_buf[48];
         snprintf(res_buf, sizeof(res_buf),
@@ -119,12 +156,12 @@ static void btn_spot_cb(struct button_item_t *btn) {
 
 static void btn_cancel_cb(struct button_item_t *btn) {
     (void)btn;
-    dialog_destruct(dialog_pota_spot);
+    dialog_destruct();
 }
 
 static void btn_ok_cb(struct button_item_t *btn) {
     (void)btn;
-    dialog_destruct(dialog_pota_spot);
+    dialog_destruct();
 }
 
 static void btn_enter_park_cb(struct button_item_t *btn) {
@@ -143,21 +180,7 @@ static void btn_enter_park_cb(struct button_item_t *btn) {
         textarea_window_set(park_buf);
 }
 
-/* forward declarations for button items */
-static bool keyboard_ok_cb(void);
-static bool keyboard_cancel_cb(void);
-
-/* ─── button pages ───────────────────────────────────────────────────────── */
-
-static button_item_t btn_enter  = { .type = BTN_TEXT, .label = "Park #",  .press = btn_enter_park_cb };
-static button_item_t btn_spot   = { .type = BTN_TEXT, .label = "SPOT",    .press = btn_spot_cb };
-static button_item_t btn_cancel = { .type = BTN_TEXT, .label = "CANCEL",  .press = btn_cancel_cb };
-static button_item_t btn_ok     = { .type = BTN_TEXT, .label = "OK",      .press = btn_ok_cb };
-
-static buttons_page_t page_input  = {{ &btn_enter, &btn_spot, &btn_cancel }};
-       buttons_page_t page_result = {{ &btn_ok }};
-
-/* ─── keyboard callbacks ─────────────────────────────────────────────────── */
+/* ─── keyboard callbacks ────────────────────────────────────────────────── */
 
 static bool keyboard_ok_cb(void) {
     const char *val = textarea_window_get();
@@ -180,33 +203,35 @@ static bool keyboard_cancel_cb(void) {
     return true;
 }
 
-/* ─── construct ──────────────────────────────────────────────────────────── */
+/* ─── construct / destruct / key ────────────────────────────────────────── */
+
+/* helper to build a full-area transparent container with centered column flex */
+static lv_obj_t *make_container(lv_obj_t *parent) {
+    lv_obj_t *c = lv_obj_create(parent);
+    lv_obj_set_size(c, 400, 280);
+    lv_obj_set_pos(c, 0, 0);
+    lv_obj_set_style_bg_opa(c, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(c, 0, 0);
+    lv_obj_set_style_pad_all(c, 20, 0);
+    lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(c, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(c, LV_FLEX_ALIGN_CENTER,
+                             LV_FLEX_ALIGN_CENTER,
+                             LV_FLEX_ALIGN_CENTER);
+    return c;
+}
 
 static void construct_cb(lv_obj_t *parent) {
     dialog.obj = dialog_init(parent);
     park_buf[0] = '\0';
 
-    /* helper to make a full-size transparent container with column flex */
-    #define make_cont(var) do { \
-        var = lv_obj_create(dialog.obj); \
-        lv_obj_set_size(var, 400, 280); \
-        lv_obj_set_pos(var, 0, 0); \
-        lv_obj_set_style_bg_opa(var, LV_OPA_TRANSP, 0); \
-        lv_obj_set_style_border_width(var, 0, 0); \
-        lv_obj_set_style_pad_all(var, 20, 0); \
-        lv_obj_clear_flag(var, LV_OBJ_FLAG_SCROLLABLE); \
-        lv_obj_set_flex_flow(var, LV_FLEX_FLOW_COLUMN); \
-        lv_obj_set_flex_align(var, \
-            LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER); \
-    } while(0)
-
     /* ── Input screen ── */
-    make_cont(cont_input);
+    cont_input = make_container(dialog.obj);
 
-    lv_obj_t *t = lv_label_create(cont_input);
-    lv_label_set_text(t, "POTA Self-Spot");
-    lv_obj_set_style_text_font(t, &lv_font_montserrat_18, 0);
-    lv_obj_set_style_text_color(t, lv_color_white(), 0);
+    lv_obj_t *title = lv_label_create(cont_input);
+    lv_label_set_text(title, "POTA Self-Spot");
+    lv_obj_set_style_text_font(title, &sony_18, 0);
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
 
     lv_obj_t *park_lbl = lv_label_create(cont_input);
     lv_label_set_text(park_lbl, "Park:");
@@ -215,35 +240,33 @@ static void construct_cb(lv_obj_t *parent) {
 
     label_park_val = lv_label_create(cont_input);
     lv_label_set_text(label_park_val, "— tap Park # to set —");
-    lv_obj_set_style_text_font(label_park_val, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_font(label_park_val, &sony_18, 0);
     lv_obj_set_style_text_color(label_park_val, lv_color_white(), 0);
 
     label_freq_val = lv_label_create(cont_input);
-    {
-        char buf[40];
-        snprintf(buf, sizeof(buf), "%.3f MHz  %s",
-                 subject_get_int(cfg_cur.fg_freq) / 1e6, mode_str());
-        lv_label_set_text(label_freq_val, buf);
-    }
+    char buf[40];
+    snprintf(buf, sizeof(buf), "%.3f MHz  %s",
+             subject_get_int(cfg_cur.fg_freq) / 1e6, mode_str());
+    lv_label_set_text(label_freq_val, buf);
     lv_obj_set_style_text_color(label_freq_val, lv_color_hex(0x808080), 0);
     lv_obj_set_style_pad_top(label_freq_val, 8, 0);
 
-    /* ── Progress screen (shown briefly during blocking POST) ── */
-    make_cont(cont_progress);
+    /* ── Progress screen ── */
+    cont_progress = make_container(dialog.obj);
     lv_obj_add_flag(cont_progress, LV_OBJ_FLAG_HIDDEN);
 
     label_posting = lv_label_create(cont_progress);
     lv_label_set_text(label_posting, "Posting...");
-    lv_obj_set_style_text_font(label_posting, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_font(label_posting, &sony_18, 0);
     lv_obj_set_style_text_color(label_posting, lv_color_white(), 0);
 
     /* ── Result screen ── */
-    make_cont(cont_result);
+    cont_result = make_container(dialog.obj);
     lv_obj_add_flag(cont_result, LV_OBJ_FLAG_HIDDEN);
 
     label_result = lv_label_create(cont_result);
     lv_label_set_text(label_result, "");
-    lv_obj_set_style_text_font(label_result, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_font(label_result, &sony_18, 0);
     lv_obj_set_style_text_color(label_result, lv_color_white(), 0);
 
     label_result_detail = lv_label_create(cont_result);
@@ -253,8 +276,6 @@ static void construct_cb(lv_obj_t *parent) {
     lv_obj_set_style_text_color(label_result_detail, lv_color_hex(0xC0C0C0), 0);
     lv_obj_set_style_text_align(label_result_detail, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_pad_top(label_result_detail, 12, 0);
-
-    #undef make_cont
 
     buttons_load_page(&page_input);
 }
@@ -266,18 +287,5 @@ static void destruct_cb(void) {
 static void key_cb(lv_event_t *e) {
     uint32_t key = *((uint32_t *)lv_event_get_param(e));
     if (key == LV_KEY_ESC)
-        dialog_destruct(dialog_pota_spot);
+        dialog_destruct();
 }
-
-/* ─── dialog descriptor ──────────────────────────────────────────────────── */
-
-static dialog_t dialog = {
-    .run          = false,
-    .construct_cb = construct_cb,
-    .destruct_cb  = destruct_cb,
-    .audio_cb     = NULL,
-    .rotary_cb    = NULL,
-    .key_cb       = key_cb,
-};
-
-dialog_t *dialog_pota_spot = &dialog;
