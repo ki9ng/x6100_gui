@@ -809,6 +809,7 @@ static action_items_t long_action_items[] = {
     { .label = " APP Settings", .action = ACTION_APP_SETTINGS },
     { .label = " APP Recorder", .action = ACTION_APP_RECORDER },
     { .label = " QTH Grid", .action = ACTION_APP_QTH },
+    { .label = " POTA Spot", .action = ACTION_APP_POTA_SPOT },
     { .label = NULL, .action = ACTION_NONE }
 };
 
