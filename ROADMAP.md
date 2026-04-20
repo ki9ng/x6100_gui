@@ -13,14 +13,16 @@ Feature plans specific to this fork. Base firmware features tracked upstream at 
 
 ## Planned
 
-### Phase 1.5 — GPS-assisted park selection
+### Phase 1.5 — GPS-assisted park selection (offline-first)
 
-When a USB GPS puck is connected and has a fix, offer a rotary-scrollable list of nearest POTA parks so the operator can pick instead of typing. No polygon verification — operator picks what they want to spot.
+When a USB GPS puck is connected and has a fix, offer a rotary-scrollable list of nearest POTA parks so the operator can pick instead of typing. Works **without WiFi at the activation site** — the park database ships bundled in the rootfs.
+
+Full world: 88,740 parks measured 2026-04-20 → 3.05 MB packed binary on SD card. Update via Settings → POTA Database → Update Now when WiFi is available.
 
 - Design: [`docs/PHASE-1.5-GPS-PARK-LOOKUP.md`](docs/PHASE-1.5-GPS-PARK-LOOKUP.md)
+- Fetch script: [`scripts/fetch-pota-parks.py`](scripts/fetch-pota-parks.py)
 - Tracking issue: [#1](https://github.com/ki9ng/x6100_gui/issues/1)
 - Prerequisite: Phase 1 tested on actual hardware
-- Open unknowns: POTA nearby-parks API endpoint signature
 
 ### Phase 2 — FT8 free-text spotting via SOTAmat
 
@@ -34,9 +36,9 @@ For operators without WiFi at the activation site. Transmits a 13-character FT8 
 
 Direct POTA spotting via JS8Call directed message (`@POTA DE KI9NG K-1234`). Coverage depends on JS8 relay stations. Lower priority than Phase 2 because JS8 adoption is smaller than FT8.
 
-### Offline parks database
+### (Offline parks database is folded into Phase 1.5)
 
-Ship the POTA parks CSV (~10-15 MB) on the SD card so Phase 1.5 works without WiFi. Most valuable once Phase 2 is shipping — combining offline spotting (FT8) with offline park lookup enables truly-remote activations.
+Originally planned as a separate milestone; superseded because Phase 1.5 is now offline-first by design. World-wide DB is 3 MB packed — no reason to ship anything smaller.
 
 ## Design principles (for contributors)
 

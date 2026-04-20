@@ -55,3 +55,8 @@ dkms.conf
 images/*.png
 _build/
 build/
+-e 
+# POTA parks fetch script outputs
+scripts/sample-output/
+scripts/*.bin
+scripts/*.json

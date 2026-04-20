@@ -8,9 +8,11 @@
 
 ## Problem
 
-Activators often know roughly where they are but have to look up or remember the exact POTA reference (`K-1234`, `US-2198`, etc). Typing a reference on the X6100's knob-driven on-screen keyboard is slow. POTA references aren't memorable — they're arbitrary numbers.
+Activators often know roughly where they are but have to look up or remember the exact POTA reference. Typing a reference on the X6100's knob-driven on-screen keyboard is slow. POTA references aren't memorable — they're arbitrary numbers.
 
 An activator with a USB GPS puck attached should be able to see a list of nearby parks and pick one with the rotary, instead of typing the reference character by character.
+
+Critically: this should work **without WiFi at the activation site** — that's the common remote-activation case. WiFi is needed to *update* the database, not to use it.
 
 ---
 
@@ -29,24 +31,94 @@ An activator with a USB GPS puck attached should be able to see a list of nearby
 - Don't filter out parks the operator isn't "in" — they may be setting up just outside a boundary, activating an overlap, etc. Show by distance, let them pick.
 
 ### Code
+
 - Must match existing firmware patterns: `dialog_t` descriptor, `buttons_page_t` pages, rotary-navigable LVGL widgets.
-- No new threading primitives beyond what `pota_spot.c` already has (which is: none). WiFi POST is sub-second, blocking inline is fine.
-- cJSON not currently in the build. Either add it (`BR2_PACKAGE_CJSON=y`) or hand-parse the response.
+- No new threading primitives beyond what `pota_spot.c` already has, EXCEPT for the DB update operation (that's legitimately long-running).
 
 ---
 
-## What's already in the firmware (don't duplicate)
+## Data sizing — REAL NUMBERS (measured 2026-04-20)
 
-- `src/gps.c` — background thread connects to `gpsd`, maintains a live `gpsdata` struct. Use from any other thread — snapshot-copy under a lock.
-- `src/gps.h` — exposes `gps_init()` (called at startup) and `gps_status()` → `{WAITING, WORKING, RESTARTING, EXITED}`.
-- `src/dialog_gps.c` — example of how to read live GPS (`fix.latitude`, `fix.longitude`, `fix.mode`, satellite counts) and update the UI.
-- `src/wifi.h` — `wifi_get_status() == WIFI_CONNECTED` check already used by `pota_spot_wifi()`.
-- `src/textarea_window.c` — knob-navigated on-screen keyboard (what Phase 1 uses for park entry).
-- `lv_dropdown_create()` and `lv_list_create()` both work with keypad input — `dialog_settings.cpp` uses dropdowns the same way this feature would use a list.
+Fetched every park worldwide from the POTA API:
+
+| | |
+|---|---|
+| Total parks worldwide | **88,740** |
+| Countries represented | 235 |
+| Raw JSON from API | 16.2 MB |
+| Minimal CSV (ref, lat, lon, name) | 5.4 MB |
+| **Packed binary (36 B/park)** | **3.05 MB** |
+| Packed binary gzipped | 1.5 MB |
+
+Top 10 by park count: US 12,921 · FR 12,816 · AU 11,166 · GB 6,527 · CA 5,988 · NO 3,334 · PL 3,089 · ES 2,597 · IT 2,095 · SE 1,983
+
+**Decision: ship worldwide, 3 MB on SD card is nothing.** Regional filtering is unnecessary given these numbers.
+
+Sample dump committed at `scripts/sample-output/world.bin.sample` for reference.
 
 ---
 
-## UX (knob-only)
+## API endpoints verified
+
+| Endpoint | What it returns | Size |
+|----------|----------------|------|
+| `GET /programs` | Full list of 264 POTA programs (countries/territories) | ~60 KB |
+| `GET /locations?program=US` | All 3,770 subdivisions worldwide (yes, query param is ignored) | 676 KB |
+| `GET /locations/<ISO>` | All parks in one subdivision (e.g. `US-IN` → 230 parks) | ~1-50 KB each |
+| `GET /park/<ref>` | Full detail for one park (name, polygon, grid, stats) | ~800 B each |
+
+All are public, no auth. Cached at CloudFront (`max-age=3600`).
+
+For a full world refresh: 3,770 API calls averaging ~15 KB each = **~55 MB raw, ~15 MB gzipped**. Takes ~3-8 minutes depending on connection.
+
+---
+
+## On-radio binary format
+
+```c
+// File: /mnt/DATA/pota-parks.bin
+// Little-endian.
+
+struct parks_header {
+    char     magic[4];       // "PARK"
+    uint32_t version;        // 1
+    uint32_t count;          // number of entries
+    uint32_t epoch;          // unix timestamp of last refresh
+};  // 16 bytes
+
+struct park_entry {
+    char     ref[11];        // "US-0288", null-padded, max 10 ASCII chars + null
+    int32_t  lat_udeg;       // latitude × 1e6, fits ±90° in int32
+    int32_t  lon_udeg;       // longitude × 1e6
+    char     name[17];       // first 16 UTF-8 chars of name + null
+} __attribute__((packed));   // 36 bytes
+
+// Entries sorted by reference for deterministic builds.
+// Total: 16 + 36 × N bytes  →  88,740 parks = 3.05 MB
+```
+
+Lookup is straightforward brute-force scan:
+```c
+int pota_find_nearby(double lat, double lon,
+                     park_match_t *out, int max_results) {
+    // Pre-compute cos(lat) once for equirectangular approximation
+    const double lat_rad = lat * M_PI / 180.0;
+    const double cos_lat = cos(lat_rad);
+    const int32_t my_lat = (int32_t)(lat * 1e6);
+    const int32_t my_lon = (int32_t)(lon * 1e6);
+
+    // Walk mmap'd file, maintain top-N heap (or just sort at end)
+    // 88k entries × ~15ns/entry = ~1.3 ms on A33 — fast enough
+}
+```
+
+No k-d tree needed. 88k iterations of integer math plus a sort of the top N is <10ms on the A33.
+
+Full park name (truncated at 16 chars in the binary) can be fetched via `GET /park/<ref>` when the user selects a row *and* WiFi is available — it's nice-to-have for confirmation but the ref is the real ID.
+
+---
+
+## UX (knob-only, offline-first)
 
 ### Input screen gains a `Nearby` button
 
@@ -62,94 +134,113 @@ An activator with a USB GPS puck attached should be able to see a list of nearby
   [ Nearby ]  [ Manual ]  [ SPOT ]  [ CANCEL ]
 ```
 
-- `Nearby` — always visible. Behavior when pressed depends on state (see "enable vs. lenient" below).
-- `Manual` — identical to current Phase 1 `Park #` button. Opens the on-screen keyboard.
-- `SPOT` — unchanged.
-- `CANCEL` — unchanged.
+- `Nearby` enabled requirement: **GPS fix only**. WiFi is NOT required — we have the DB onboard.
+- `Manual` — unchanged from Phase 1
+- `SPOT`, `CANCEL` — unchanged
 
-GPS status line is a read-only label updated on a 500ms timer (same pattern as `dialog_gps.c`).
+GPS status line updated on a 500ms timer (pattern from `dialog_gps.c`).
 
 ### Nearby list screen
 
 ```
 ┌─ Nearby POTA Parks ──────────────────┐
-│  ▶ K-4245  Indiana Dunes NP    0.3km │
-│    K-2257  Indiana Dunes SP    1.8km │
-│    K-6732  Cowles Bog Trail    2.1km │
-│    K-8841  Miller Woods        4.4km │
-│    K-4422  Hoosier Prairie SNP 5.9km │
-│    ...                               │
+│ ▶ US-4245  Indiana Dunes NP    0.3km │
+│   US-2257  Indiana Dunes SP    1.8km │
+│   US-6732  Cowles Bog Trail    2.1km │
+│   US-8841  Miller Woods        4.4km │
+│   US-4422  Hoosier Prairie     5.9km │
+│   US-3305  Gary State Park    10.2km │
+│   ...                                │
 │                                      │
 │  Rotate to scroll · Select to pick   │
 └──────────────────────────────────────┘
                          [ BACK ]
 ```
 
-- `lv_list_create()` with one `lv_list_add_btn()` per park. Container holds the list.
-- Rotary scrolls the focus; select key picks the focused row.
-- Maybe 10-15 results. Truncate names with `LV_LABEL_LONG_DOT` if needed.
-- Selecting a row: `park_buf` populated, switch back to `cont_input`, focus goes to `SPOT` button.
-- `BACK` returns to input screen without changing the park.
-- If API call fails or returns empty, show an error line instead of the list.
+- `lv_list_create()` with ~15 rows visible, total ~50 nearest parks returned
+- Rotary scrolls focus; select picks
+- Selecting populates park_buf, switches back to input screen, focus goes to `SPOT`
+- Names shown are the truncated 16-char version from the binary; full name visible only after selection if online (optional enhancement)
 
-### Lenient vs. strict enable on `Nearby`
+### Lenient enable with explanatory errors
 
-**Decision: lenient.** Always render the button enabled. Clicking it when the preconditions aren't met shows an explanatory message:
+`Nearby` button always visually enabled. Pressing it when unavailable shows a message:
+- No GPS fix: `"No GPS fix. Attach USB GPS puck and wait for fix. See APP → GPS."`
+- DB missing (shouldn't happen in shipped firmware): `"Park database missing. Settings → POTA DB → Update Now"`
 
-- No GPS puck / no fix: `"No GPS fix. Attach a USB GPS puck and wait for a 2D+ fix. See APP → GPS for status."`
-- No WiFi: `"Nearby lookup needs WiFi. Connect WiFi or use Manual entry."`
-- Both missing: show GPS message first (GPS is the unusual hardware; WiFi they already know about).
-
-Reasoning: a greyed-out button is confusing — the operator doesn't know what to do next. A lenient button with a clear error message is self-teaching.
+Reason: greyed-out buttons confuse users who don't know what's wrong.
 
 ---
 
-## Data source
+## Database update UX
 
-### Option A: POTA online API (preferred for Phase 1.5)
+New Settings menu item: **POTA Database**.
 
-The pota.app frontend already does nearby-park lookups as the user pans the map. The endpoint is not documented but is discoverable.
-
-**Open research action**: open pota.app in a desktop browser with devtools → Network tab open. Pan and zoom the map. Watch for the XHR that fetches parks. Capture:
-- Full URL pattern (base + query params)
-- Request headers (any special origin/referer needed?)
-- Response JSON shape (fields for reference, name, lat, lon)
-
-Likely candidates to check:
 ```
-GET https://api.pota.app/locations/parks?latitude=...&longitude=...&radius_km=...
-GET https://api.pota.app/park/autocomplete?q=...
-GET https://api.pota.app/park/search?bbox=...
+┌─ POTA Park Database ─────────────────┐
+│                                      │
+│  Current: 88,740 parks               │
+│  Updated: 2026-04-20 (today)         │
+│                                      │
+│  [ Update Now ]     [ Back ]         │
+└──────────────────────────────────────┘
 ```
 
-If no suitable endpoint exists, fall back to Option B.
+Pressing **Update Now**:
 
-### Option B: Offline parks database (fallback; also useful for Phase 2)
+```
+┌─ Updating Park Database ─────────────┐
+│                                      │
+│  Fetching: 1247 / 3770               │
+│  ████████░░░░░░░░░░░░░░░             │
+│  34,812 parks so far                 │
+│                                      │
+│               [ CANCEL ]             │
+└──────────────────────────────────────┘
+```
 
-Download the POTA parks CSV (~80k rows, ~10-15 MB) at firmware build time, ship on the SD card. On the radio, sorted-by-centroid-distance search is trivial.
+Flow:
+1. Check WiFi → if not connected, error
+2. Background thread (legitimate case — runs several minutes):
+   - GET `/locations?program=US` → list of subdivisions
+   - For each subdivision, GET `/locations/<ISO>`, append parks
+   - Progress updates posted via `scheduler_put()` for the progress bar
+3. Sort by reference, pack to binary
+4. Write to `/mnt/DATA/pota-parks.bin.tmp`
+5. Atomic `rename()` to `pota-parks.bin`
+6. Update epoch, refresh mmap
+7. Return to settings with new timestamp visible
 
-Pros:
-- Works without WiFi — critical once Phase 2 (SOTAmat) is shipping for truly remote activations
-- Independent of POTA API availability and endpoint stability
-- Fast — microseconds
+Cancellable via CANCEL button (sets an atomic flag; worker stops at next subdivision boundary).
 
-Cons:
-- Stale data; new parks not known until firmware update or manual refresh
-- Needs a refresh mechanism ("Update parks DB" button in Settings that downloads the CSV when WiFi is available)
-- SD card space cost
+### Age indication
 
-Defer until after Phase 1.5 ships with the online endpoint.
+- Settings shows plain date
+- If DB is > 90 days old, input dialog's GPS status line shows a subtle nag:  
+  `"GPS: 3D fix, 7 sats · DB 127 days old"`
+
+No auto-update. WiFi connection timing is user's call.
 
 ---
 
-## JSON parsing
+## Firmware-bundled initial database
 
-Firmware currently builds JSON with `snprintf` but doesn't parse any incoming JSON. For this feature, pick one:
+Ship a `pota-parks.bin` inside the rootfs via buildroot so first boot has a working DB.
 
-1. **Add cJSON** — single-header, ~3kB. `BR2_PACKAGE_CJSON=y` in buildroot. Cleanest; reusable for future features.
-2. **Hand-roll** — fragile, but avoids the dependency. Response shape is predictable so doable.
+**Build-time flow** (in AetherX6100Buildroot):
+1. Add a post-build script that runs `fetch-pota-parks.py` on the build host
+2. Installs result to `$TARGET_DIR/usr/share/pota-parks.bin`
+3. Adds ~3 MB to the rootfs
 
-Prefer cJSON.
+**First-boot logic** in firmware:
+```c
+if (access("/mnt/DATA/pota-parks.bin", R_OK) != 0) {
+    // Copy bundled DB to persistent location
+    copy_file("/usr/share/pota-parks.bin", "/mnt/DATA/pota-parks.bin");
+}
+```
+
+This means even a fresh radio with no WiFi ever configured still has 88k parks available the moment a GPS puck is attached.
 
 ---
 
@@ -158,82 +249,89 @@ Prefer cJSON.
 ### New files
 
 ```
-src/pota_parks.h
-src/pota_parks.c
-```
-
-Interface:
-
-```c
-// pota_parks.h
-typedef struct {
-    char   reference[12];   // "K-1234", "US-2198", up to ~10 chars
-    char   name[64];
-    double distance_km;
-} pota_park_t;
-
-// Blocking HTTP call, up to ~1-2 sec on good WiFi.
-// Returns number of parks found (0 on empty/error). Fills out[] up to max_results.
-int pota_find_nearby(double lat, double lon,
-                     pota_park_t *out, int max_results);
+src/pota_parks.h          /* public API */
+src/pota_parks.c          /* mmap binary, find_nearby, update logic */
+src/dialog_pota_db.c      /* Settings → POTA DB dialog */
+src/dialog_pota_db.h
+scripts/fetch-pota-parks.py  /* host-side prefetch for build + cli testing */
 ```
 
 ### Modified files
 
-**`src/dialog_pota_spot.c`:**
-- Add fourth container: `cont_nearby_list`
-- Add button: `btn_nearby` (pressed → check GPS+WiFi → call `pota_find_nearby` → populate list → show)
-- Add callback: `park_selected_cb` (list row selected → copy reference to `park_buf` → show input screen)
-- Update GPS status line on input screen via a timer
-- Page changes:
-  - `page_input`: `{ &btn_nearby, &btn_manual, &btn_spot, &btn_cancel }` (was 3 buttons; now 4)
-  - `page_nearby`: `{ &btn_back }`
+```
+src/dialog_pota_spot.c    /* Add Nearby button, nearby list container */
+src/dialog_settings.cpp   /* Add "POTA Database" menu item */
+src/params/params.h       /* Add ACTION_APP_POTA_DB */
+src/main_screen.c         /* Wire new action */
+src/CMakeLists.txt        /* Add new sources */
+```
 
-**`src/CMakeLists.txt`:** add `pota_parks.c`
+### Buildroot changes
 
-**`br2_external/configs/X6100_defconfig`** (in AetherX6100Buildroot): add `BR2_PACKAGE_CJSON=y` if going cJSON route.
+```
+br2_external/configs/X6100_defconfig   /* BR2_PACKAGE_CJSON=y */
+br2_external/package/pota-parks/       /* new package that installs pota-parks.bin */
+```
 
-### Estimated size
+### Rough sizing
 
-- `pota_parks.c`: ~100-150 lines (HTTP call + JSON parse + distance math)
-- `dialog_pota_spot.c` additions: ~100-150 lines (new container, list callbacks, button logic)
-- Total: ~300 lines of new code, no new threading, no new external dependencies beyond cJSON.
+- `pota_parks.c`: ~250 lines (mmap + find_nearby + background updater + atomic write)
+- `dialog_pota_db.c`: ~150 lines (settings dialog with progress bar)
+- `dialog_pota_spot.c` additions: ~100 lines (nearby button + list container)
+- Total: ~500 lines of C + ~150 lines Python for the prefetch
 
-### Estimated time
+### Update thread architecture
 
-Half a day of coding once the POTA endpoint is captured. The unknown is the endpoint signature — if it takes an hour of devtools sniffing to figure out, fine. If it needs reverse engineering a compiled JS bundle, longer.
+Updater runs in a detached pthread because it's many-minute long. Uses `scheduler_put()` to push progress updates back to the LVGL thread. Atomic cancel flag checked between each subdivision fetch.
 
----
+```c
+// pota_parks.c
+static atomic_bool update_cancel;
+static atomic_bool update_running;
 
-## Why not do it right now
+typedef struct {
+    int fetched;
+    int total;
+    int parks;
+} update_progress_t;
 
-Phase 1 hasn't been tested on actual hardware yet. Build is clean, release is published, but the SD card hasn't been flashed and booted. Until we confirm:
-
-- The dialog renders correctly on the 800×480 screen
-- The POTA button shows up at APP → page 3
-- Knob navigation actually reaches the button
-- WiFi POST works from the radio (not just from the OptiPlex)
-
-...adding more features on top is building on an unproven foundation. Phase 1.5 should come after Phase 1 is confirmed working.
-
----
-
-## Open questions when implementation starts
-
-1. POTA nearby-parks endpoint signature (sniff pota.app)
-2. cJSON vs hand-rolled parser
-3. How to handle the GPS status update — LVGL timer at 500ms (like `dialog_gps.c`) or one-shot read when the dialog opens?
-4. How many results in the list? 10? 20? All within 10km?
-5. What's the sort order — distance only, or distance + recent activation count (hot parks first)?
-6. Should the selected park reference persist across dialog closes as the "last used" default (like WiFi SSID does)?
+void pota_parks_start_update(pota_update_progress_cb_t cb);
+void pota_parks_cancel_update(void);
+bool pota_parks_update_running(void);
+```
 
 ---
 
-## Reference implementation hints
+## Action items (in order)
 
-The tightest-fit reference in the existing code is `dialog_settings.cpp`'s long-press action dropdown:
-- Uses `lv_dropdown_create()` — very similar UX pattern to `lv_list_create()`
-- Rotary-navigable without any special handling
-- `lv_dropdown_get_selected()` reads the picked index
+- [ ] Flash and test Phase 1 on actual hardware — confirm WiFi POST works from the radio
+- [ ] Verify `cJSON` is addable to buildroot (or pick a hand-rolled alternative)
+- [ ] Add `pota-parks` buildroot package that runs `fetch-pota-parks.py` at build time and installs the binary
+- [ ] Implement `pota_parks.c` with mmap + find_nearby
+- [ ] Implement `dialog_pota_db.c` (settings page with progress bar)
+- [ ] Background updater thread with cancel + atomic rename
+- [ ] `dialog_pota_spot.c`: add `Nearby` button + nearby list container
+- [ ] GPS status line on input screen with 500ms timer
+- [ ] First-boot copy of bundled DB to `/mnt/DATA/` if missing
 
-For the list widget itself, LVGL 8.x docs: https://docs.lvgl.io/8.3/widgets/extra/list.html
+---
+
+## Not doing (captured to avoid scope creep)
+
+- No polygon containment check
+- No auto-submission of spots based on GPS position
+- No regional-only DB variants (world is only 3 MB; no point splitting)
+- No auto-update on WiFi connect — manual trigger only
+- No delta updates (full refetch is ~15 MB gzipped; simpler than diff logic)
+- No on-radio park name lookup beyond the truncated 16-char name; full name requires WiFi via `/park/<ref>`
+
+---
+
+## Reference: fetch-pota-parks.py
+
+Committed at `scripts/fetch-pota-parks.py`. Fetches all 3,770 subdivisions, packs to 36-byte-per-park binary. Sample output from 2026-04-20: **88,740 parks, 3,194,672 bytes**.
+
+Run ad-hoc for testing:
+```bash
+./scripts/fetch-pota-parks.py --output /tmp/parks.bin --csv /tmp/parks.csv
+```
