@@ -38,6 +38,8 @@
 #include "scheduler.h"
 #include "wifi.h"
 #include "usb_devices.h"
+#include "freedv.h"
+#include "msg.h"
 
 #define DISP_BUF_SIZE (800 * 480 * 4)
 
@@ -97,6 +99,7 @@ int main(void) {
     params_init();
     audio_set_play_vol(params.play_gain_db_f.x);
     audio_set_rec_vol(params.rec_gain_db_f.x);
+    freedv_init();
     mfk_init();
     vol_init();
     styles_init(params.theme.x);
@@ -117,6 +120,7 @@ int main(void) {
         LV_LOG_ERROR("Can't init QSO log");
     }
     qso_log_import_adif("/mnt/incoming_log.adi");
+    msg_schedule_long_text_fmt("FreeDV-only PoC v0.1 — codec2 not yet linked. Swap to r1cbu image for normal ops.");
 
     pthread_t thread;
     pthread_create(&thread, NULL, tick_thread, NULL);

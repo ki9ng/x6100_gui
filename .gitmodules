@@ -2,3 +2,6 @@
 	path = lvgl
 	url = https://github.com/gdyuldin/lvgl.git
 	branch = neon_draw
+[submodule "third-party/codec2"]
+	path = third-party/codec2
+	url = https://github.com/drowe67/codec2.git

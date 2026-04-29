@@ -108,3 +108,4 @@ jobs:
       if: startsWith(github.ref, 'refs/tags/')
       with:
         files: AetherX6100Buildroot/build/images/sdcard.${{ github.ref_name }}.img.zip
+        prerelease: ${{ startsWith(github.ref_name, 'freedv-poc-') }}
