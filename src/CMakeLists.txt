@@ -32,6 +32,9 @@ include_directories(${CMAKE_SYSROOT}/usr/include/ft8lib/)
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 
+find_library(CODEC2_LIB codec2 PATHS ${CMAKE_SYSROOT}/usr/lib REQUIRED)
+find_path(CODEC2_INC codec2/freedv_api.h PATHS ${CMAKE_SYSROOT}/usr/include REQUIRED)
+
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
 pkg_check_modules(deps REQUIRED IMPORTED_TARGET
@@ -39,7 +42,10 @@ pkg_check_modules(deps REQUIRED IMPORTED_TARGET
 )
 
 
+target_include_directories(${PROJECT_NAME} PRIVATE ${CODEC2_INC})
+
 target_link_libraries(${PROJECT_NAME} PRIVATE
+${CODEC2_LIB}
 PkgConfig::deps
 FT8 QTH
 Threads::Threads

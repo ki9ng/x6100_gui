@@ -169,6 +169,10 @@ typedef struct {
 
     params_uint8_t       theme;
 
+    /* FreeDV */
+
+    params_uint8_t      freedv_mode;
+
     /* durty flags */
 
     struct {

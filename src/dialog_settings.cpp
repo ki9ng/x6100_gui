@@ -24,6 +24,7 @@ extern "C" {
     #include "keyboard.h"
     #include "clock.h"
     #include "audio.h"
+    #include "freedv.h"
     #include "meter.h"
 
     #include "lvgl/lvgl.h"
@@ -52,10 +53,12 @@ extern "C" {
 static void make_general_page();
 static void make_ui_page();
 static void make_voice_page();
+static void make_freedv_page();
 
 static void load_general_page(button_item_t *item);
 static void load_ui_page(button_item_t *item);
 static void load_voice_page(button_item_t *item);
+static void load_freedv_page(button_item_t *item);
 
 static void construct_cb(lv_obj_t *parent);
 static void destruct_cb();
@@ -96,11 +99,18 @@ static button_item_t btn_voice = {
     .press = load_voice_page,
 };
 
+static button_item_t btn_freedv = {
+    .type  = BTN_TEXT,
+    .label = "FreeDV",
+    .press = load_freedv_page,
+};
+
 buttons_page_t btn_page = {
     {
      &btn_general,
      &btn_ui,
      &btn_voice,
+     &btn_freedv,
      }
 };
 
@@ -2040,6 +2050,50 @@ static void make_voice_page() {
 
     row_dsc[row] = LV_GRID_TEMPLATE_LAST;
     lv_obj_set_grid_dsc_array(grid, col_dsc, row_dsc);
+}
+
+
+/* FreeDV */
+
+static uint8_t make_freedv_mode(uint8_t row) {
+    lv_obj_t *obj;
+
+    obj = lv_label_create(grid);
+    lv_label_set_text(obj, "FreeDV mode");
+    lv_obj_set_grid_cell(obj, LV_GRID_ALIGN_START, 0, 1, LV_GRID_ALIGN_CENTER, row, 1);
+    row++;
+
+    obj = lv_dropdown_create(grid);
+    lv_dropdown_set_options(obj, " Off \n 700D \n 1600 ");
+    lv_dropdown_set_symbol(obj, NULL);
+    lv_dropdown_set_selected(obj, (uint16_t)fdv_get_mode());
+    lv_obj_set_grid_cell(obj, LV_GRID_ALIGN_STRETCH, 0, 4, LV_GRID_ALIGN_CENTER, row, 1);
+    lv_obj_add_event_cb(obj, [](lv_event_t *e) {
+        lv_obj_t *dd = lv_event_get_target(e);
+        fdv_set_mode((freedv_mode_t)lv_dropdown_get_selected(dd));
+    }, LV_EVENT_VALUE_CHANGED, NULL);
+    row++;
+
+    return row;
+}
+
+static void make_freedv_page() {
+    grid_delete();
+    grid_create();
+    uint8_t row = 0;
+
+    row = make_freedv_mode(row);
+
+    row_dsc[row] = LV_GRID_TEMPLATE_LAST;
+    lv_obj_set_grid_dsc_array(grid, col_dsc, row_dsc);
+}
+
+static void load_freedv_page(button_item_t *item) {
+    make_freedv_page();
+    for (auto &&btn : btn_page.items) {
+        buttons_mark(btn, false);
+    }
+    buttons_mark(item, true);
 }
 
 static void construct_cb(lv_obj_t *parent) {

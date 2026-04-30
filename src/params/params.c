@@ -103,6 +103,7 @@ params_t params = {
     .wifi_enabled           = { .x = false, .name="wifi_enabled" },
 
     .theme                  = { .x = THEME_SIMPLE, .name="theme"},
+    .freedv_mode            = { .x = 0,            .name = "freedv_mode" },
 };
 
 static sqlite3_stmt     *write_mode_stmt;
@@ -261,6 +262,7 @@ static bool params_load() {
         if (params_load_str(&params.callsign, name, t)) continue;
         if (params_load_bool(&params.wifi_enabled, name, i)) continue;
         if (params_load_uint8(&params.theme, name, i)) continue;
+        if (params_load_uint8(&params.freedv_mode, name, i)) continue;
     }
 
     sqlite3_finalize(stmt);
@@ -367,6 +369,7 @@ static void params_save() {
     params_save_str(&params.callsign);
     params_save_bool(&params.wifi_enabled);
     params_save_uint8(&params.theme);
+    params_save_uint8(&params.freedv_mode);
 
     sql_query_exec("COMMIT");
 }

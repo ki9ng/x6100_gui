@@ -13,6 +13,7 @@
 #include "waterfall.h"
 #include "util.h"
 #include "radio.h"
+#include "freedv.h"
 #include "events.h"
 #include "msg.h"
 #include "msg_tiny.h"
@@ -1117,6 +1118,7 @@ lv_obj_t * main_screen() {
 }
 
 void main_screen_notify_rx_tx(bool tx) {
+    if (tx) freedv_on_tx_start(); else freedv_on_tx_stop();
     if (tx) {
         event_send(obj, EVENT_RADIO_TX, NULL);
 
