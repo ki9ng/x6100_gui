@@ -67,6 +67,7 @@ extern buttons_page_t buttons_page_msg_cw_1;
 extern buttons_page_t buttons_page_msg_cw_2;
 
 extern buttons_page_t buttons_page_rtty;
+extern buttons_page_t buttons_page_freedv;
 
 extern buttons_group_t buttons_group_gen;
 extern buttons_group_t buttons_group_app;

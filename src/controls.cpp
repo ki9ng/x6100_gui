@@ -13,6 +13,7 @@ extern "C" {
 #include "msg.h"
 #include "voice.h"
 #include "rtty.h"
+#include "freedv.h"
 }
 
 static inline bool toggle_subj(Subject *subj);
@@ -70,6 +71,7 @@ static std::map<cfg_ctrl_t, std::string> control_name_voice{
     {CTRL_RTTY_SHIFT, "Teletype frequency shift"},
     {CTRL_RTTY_CENTER, "Teletype frequency center"},
     {CTRL_RTTY_REVERSE, "Teletype reverse switcher"},
+    {CTRL_FREEDV_MODE, "FreeDV mode"},
     {CTRL_IF_SHIFT, "IF shift control"},
 };
 
@@ -636,6 +638,17 @@ void controls_encoder_update(cfg_ctrl_t ctrl, int16_t diff, std::string &msg) {
                 voice_say_bool("Teletype reverse", b);
             }
             break;
+
+        case CTRL_FREEDV_MODE: {
+            freedv_mode_t mode = fdv_get_mode();
+            int m = (int)mode;
+            if (diff > 0)      m = (m >= (int)FDV_MODE_1600) ? (int)FDV_MODE_OFF : m + 1;
+            else if (diff < 0) m = (m <= (int)FDV_MODE_OFF)  ? (int)FDV_MODE_1600 : m - 1;
+            fdv_set_mode((freedv_mode_t)m);
+            snprintf(msg.data(), msg.capacity(), "FreeDV: %s", freedv_mode_label((freedv_mode_t)m));
+            if (diff) voice_say_text_fmt("FreeDV %s", freedv_mode_label((freedv_mode_t)m));
+            break;
+        }
 
         case CTRL_IF_SHIFT:
             {

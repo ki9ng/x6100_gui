@@ -173,6 +173,11 @@ void main_screen_start_app(press_action_t app_action) {
             voice_say_text_fmt("Wi-Fi window");
             break;
 
+        case ACTION_APP_FREEDV:
+            buttons_load_page(&buttons_page_freedv);
+            voice_say_text_fmt("FreeDV mode");
+            break;
+
         default:
             break;
     }
@@ -239,6 +244,7 @@ void main_screen_action(press_action_t action) {
         case ACTION_APP_SETTINGS:
         case ACTION_APP_RECORDER:
         case ACTION_APP_WIFI:
+        case ACTION_APP_FREEDV:
             main_screen_start_app(action);
             break;
 

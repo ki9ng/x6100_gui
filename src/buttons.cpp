@@ -22,6 +22,7 @@ extern "C" {
     #include "msg.h"
     #include "panel.h"
     #include "params/params.h"
+    #include "freedv.h"
     #include "voice.h"
     #include "pubsub_ids.h"
 }
@@ -285,7 +286,8 @@ static button_item_t btn_nr_level = make_encoder_btn(nr_level_label_getter, CTRL
 /* APP */
 
 static button_item_t btn_rtty = make_app_btn("RTTY", ACTION_APP_RTTY);
-static button_item_t btn_ft8  = make_app_btn("FT8", ACTION_APP_FT8);
+static button_item_t btn_ft8    = make_app_btn("FT8", ACTION_APP_FT8);
+static button_item_t btn_freedv = make_app_btn("FreeDV", ACTION_APP_FREEDV);
 static button_item_t btn_swr  = make_app_btn("SWR\nScan", ACTION_APP_SWRSCAN);
 static button_item_t btn_gps  = make_app_btn("GPS", ACTION_APP_GPS);
 
@@ -415,7 +417,7 @@ static button_item_t btn_app_p2 = make_page_btn("(APP 2:3)", "Application|page 2
 static button_item_t btn_app_p3 = make_page_btn("(APP 3:3)", "Application|page 3");
 
 static buttons_page_t page_app_1 = {
-    {&btn_app_p1, &btn_rtty, &btn_ft8, &btn_swr, &btn_gps}
+    {&btn_app_p1, &btn_freedv, &btn_ft8, &btn_swr, &btn_gps}
 };
 static buttons_page_t page_app_2 = {
     {&btn_app_p2, &btn_rec, &btn_qth, &btn_callsign, &btn_settings}
@@ -428,6 +430,23 @@ static buttons_page_t page_app_3 = {
 
 buttons_page_t buttons_page_rtty = {
     {&btn_rtty_p1, &btn_rtty_rate, &btn_rtty_shift, &btn_rtty_center, &btn_rtty_reverse}
+};
+
+static const char *freedv_mode_btn_label() {
+    static char buf[16];
+    snprintf(buf, sizeof(buf), "FDV:%s", freedv_mode_label(fdv_get_mode()));
+    return buf;
+}
+
+static button_item_t btn_freedv_p1 = {
+    .type  = BTN_TEXT,
+    .label = "(FDV 1:1)",
+    .press = NULL,
+};
+static button_item_t btn_freedv_mode_btn = make_encoder_btn(freedv_mode_btn_label, CTRL_FREEDV_MODE);
+
+buttons_page_t buttons_page_freedv = {
+    {&btn_freedv_p1, &btn_freedv_mode_btn}
 };
 
 buttons_group_t buttons_group_gen = {

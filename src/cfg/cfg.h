@@ -76,6 +76,7 @@ typedef enum {
     CTRL_RTTY_SHIFT,
     CTRL_RTTY_CENTER,
     CTRL_RTTY_REVERSE,
+    CTRL_FREEDV_MODE,
 
     CTRL_LAST,
 
