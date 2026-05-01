@@ -43,6 +43,7 @@
 #include "dialog_recorder.h"
 #include "dialog_callsign.h"
 #include "dialog_wifi.h"
+#include "dialog_freedv.h"
 #include "backlight.h"
 #include "buttons.h"
 #include "recorder.h"
@@ -174,7 +175,7 @@ void main_screen_start_app(press_action_t app_action) {
             break;
 
         case ACTION_APP_FREEDV:
-            buttons_load_page(&buttons_page_freedv);
+            dialog_construct(dialog_freedv, obj);
             voice_say_text_fmt("FreeDV mode");
             break;
 

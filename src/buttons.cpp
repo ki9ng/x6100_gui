@@ -445,8 +445,18 @@ static button_item_t btn_freedv_p1 = {
 };
 static button_item_t btn_freedv_mode_btn = make_encoder_btn(freedv_mode_btn_label, CTRL_FREEDV_MODE);
 
+static void resync_btn_cb(button_item_t *item) {
+    freedv_resync();
+}
+
+static button_item_t btn_freedv_resync = {
+    .type  = BTN_TEXT,
+    .label = "ReSync",
+    .press = resync_btn_cb,
+};
+
 buttons_page_t buttons_page_freedv = {
-    {&btn_freedv_p1, &btn_freedv_mode_btn}
+    {&btn_freedv_p1, &btn_freedv_mode_btn, &btn_freedv_resync}
 };
 
 buttons_group_t buttons_group_gen = {

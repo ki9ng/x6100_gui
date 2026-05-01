@@ -30,3 +30,10 @@ bool        freedv_is_active(void);
 /* Called from main_screen_notify_rx_tx() on PTT transitions */
 void freedv_on_tx_start(void);
 void freedv_on_tx_stop(void);
+
+/* Stats accessor — safe to call from LVGL thread while RX is running.
+ * Returns sync=0 and snr=0 when no codec2 handle is open. */
+void freedv_get_stats(int *sync_out, float *snr_out);
+
+/* Force re-acquire sync — passes sync_cmd=0 to codec2 freedv_set_sync(). */
+void freedv_resync(void);

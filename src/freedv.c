@@ -149,12 +149,30 @@ cleanup:
 
 /* ── Internal helpers ────────────────────────────────────────────────────── */
 
+/* Cycling callsign buffer for FreeDV text channel TX callback */
+static char  txt_tx_buf[16];
+static int   txt_tx_idx;
+
+static char txt_tx_cb(void *state) {
+    char c = txt_tx_buf[txt_tx_idx];
+    if (++txt_tx_idx >= (int)strlen(txt_tx_buf))
+        txt_tx_idx = 0;
+    return c;
+}
+
 static void open_fdv(freedv_mode_t mode) {
     int cm = app_to_codec2_mode(mode);
     if (cm < 0) return;
     fdv = freedv_open(cm);
-    if (!fdv)
+    if (!fdv) {
         fprintf(stderr, "[freedv] freedv_open(%d) failed\n", cm);
+        return;
+    }
+    /* Register callsign as the cycled text-channel TX string */
+    snprintf(txt_tx_buf, sizeof(txt_tx_buf), "%-6s ",
+             params.callsign.x[0] ? params.callsign.x : "KI9NG");
+    txt_tx_idx = 0;
+    freedv_set_callback_txt(fdv, NULL, txt_tx_cb, NULL);
 }
 
 static void rx_start(void) {
@@ -240,4 +258,17 @@ void freedv_on_tx_stop(void) {
     if (freedv_is_active())
         rx_start();
     fprintf(stderr, "[freedv] TX stop\n");
+}
+
+void freedv_get_stats(int *sync_out, float *snr_out) {
+    if (!fdv || !initialised) {
+        if (sync_out) *sync_out = 0;
+        if (snr_out)  *snr_out  = 0.0f;
+        return;
+    }
+    freedv_get_modem_stats(fdv, sync_out, snr_out);
+}
+
+void freedv_resync(void) {
+    if (fdv) freedv_set_sync(fdv, 0);
 }
