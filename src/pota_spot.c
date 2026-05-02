@@ -8,6 +8,7 @@
  */
 
 #include "pota_spot.h"
+#include "pota_parks.h"
 
 #include "lvgl/lvgl.h"
 #include "params/params.h"
@@ -22,16 +23,49 @@
 #define POTA_SOURCE     "X6100-firmware"
 #define HTTP_TIMEOUT_SEC 10L
 
+/* Module init flag — curl_global_init must be called exactly once */
+static bool curl_initialized = false;
+
 /* Discard response body — we only care about the HTTP status code */
 static size_t discard_response(void *ptr, size_t size, size_t nmemb, void *ud) {
     (void)ptr; (void)ud;
     return size * nmemb;
 }
 
+void pota_spot_init(void) {
+    CURLcode rc = curl_global_init(CURL_GLOBAL_DEFAULT);
+    if (rc != CURLE_OK) {
+        LV_LOG_ERROR("pota_spot_init: curl_global_init failed: %s", curl_easy_strerror(rc));
+        return;
+    }
+    curl_initialized = true;
+    LV_LOG_USER("pota_spot_init: curl ready");
+}
+
+void pota_spot_cleanup(void) {
+    if (curl_initialized) {
+        curl_global_cleanup();
+        curl_initialized = false;
+    }
+}
+
 bool pota_spot_wifi(const char *park, int32_t freq_hz,
                     const char *mode, const char *comment) {
+
+    if (!curl_initialized) {
+        LV_LOG_ERROR("pota_spot_wifi: curl not initialized");
+        return false;
+    }
+
     if (wifi_get_status() != WIFI_CONNECTED) {
         LV_LOG_WARN("POTA spot: no WiFi");
+        return false;
+    }
+
+    /* Callsign comes from the radio's own params — same one FT8 uses */
+    const char *callsign = params.callsign.x;
+    if (!callsign || callsign[0] == '\0') {
+        LV_LOG_WARN("POTA spot: callsign not set in radio params");
         return false;
     }
 
@@ -41,7 +75,7 @@ bool pota_spot_wifi(const char *park, int32_t freq_hz,
         return false;
     }
 
-    /* JSON body */
+    /* JSON body — frequency in kHz as a string, matching POTA API expectation */
     char body[512];
     snprintf(body, sizeof(body),
         "{\"activator\":\"%s\","
@@ -51,8 +85,8 @@ bool pota_spot_wifi(const char *park, int32_t freq_hz,
         "\"mode\":\"%s\","
         "\"source\":\"%s\","
         "\"comments\":\"%s\"}",
-        params.callsign.x,
-        params.callsign.x,
+        callsign,
+        callsign,
         freq_hz / 1000.0,
         park,
         mode,
@@ -89,6 +123,11 @@ bool pota_spot_wifi(const char *park, int32_t freq_hz,
         return false;
     }
 
-    LV_LOG_USER("POTA spot posted: %s %.1f kHz %s", park, freq_hz / 1000.0, mode);
+    LV_LOG_USER("POTA spot posted: %s %.1f kHz %s as %s",
+                park, freq_hz / 1000.0, mode, callsign);
+
+    /* Persist to park history */
+    pota_parks_add(park);
+
     return true;
 }

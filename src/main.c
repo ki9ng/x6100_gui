@@ -37,6 +37,8 @@
 #include "qso_log.h"
 #include "scheduler.h"
 #include "wifi.h"
+#include "pota_spot.h"
+#include "pota_parks.h"
 #include "usb_devices.h"
 
 #define DISP_BUF_SIZE (800 * 480 * 4)
@@ -117,6 +119,8 @@ int main(void) {
         LV_LOG_ERROR("Can't init QSO log");
     }
     qso_log_import_adif("/mnt/incoming_log.adi");
+    pota_spot_init();
+    pota_parks_init();
 
     pthread_t thread;
     pthread_create(&thread, NULL, tick_thread, NULL);
@@ -136,6 +140,7 @@ int main(void) {
         lv_timer_handler_run_in_period(5);
         usleep(1000);
     }
+    pota_spot_cleanup();
     return 0;
 }
 

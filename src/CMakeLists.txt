@@ -15,7 +15,7 @@ target_sources(${PROJECT_NAME} PUBLIC
     textarea_window.c cw_encoder.c buttons.cpp vol.cpp recorder.c
     voice.cpp cw_tune_ui.c adif.c qso_log.c scheduler.cpp
     dialog_wifi.c wifi.cpp controls.cpp usb_devices.cpp
-    pota_spot.c dialog_pota_spot.c
+    pota_spot.c dialog_pota_spot.c pota_parks.c
     knobs.cpp
 )
 

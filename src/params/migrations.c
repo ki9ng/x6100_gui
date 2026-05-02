@@ -99,12 +99,28 @@ static int _3_update_spectrum_peak_hold() {
     return 0;
 }
 
+static int _4_create_pota_parks_table() {
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE IF NOT EXISTS pota_parks ("
+            "id   INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "park TEXT NOT NULL UNIQUE, "
+            "ts   INTEGER NOT NULL DEFAULT 0"
+        ");",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        printf("Cannot create pota_parks table: %s\n", sqlite3_errmsg(db));
+        return 1;
+    }
+    return 0;
+}
+
 /* Migrations array */
 static int (*migrations[])() = {
     _0_init_migrations,
     _1_create_ftx_table,
     _2_update_atu_freq,
     _3_update_spectrum_peak_hold,
+    _4_create_pota_parks_table,
 };
 
 int migrations_apply(void) {

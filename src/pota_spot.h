@@ -13,14 +13,29 @@
 #include <stdint.h>
 
 /**
+ * Call once after database_init() and before any pota_spot_wifi() calls.
+ * Runs curl_global_init(CURL_GLOBAL_DEFAULT).
+ */
+void pota_spot_init(void);
+
+/**
+ * Call on app shutdown to release curl resources.
+ */
+void pota_spot_cleanup(void);
+
+/**
  * Post a self-spot to https://api.pota.app/spot/
- * Blocks until the HTTP request completes (typically < 1 second on good WiFi).
+ *
+ * Callsign is read from params.callsign.x (the same one used by FT8).
+ * On success the park is saved to the local history via pota_parks_add().
+ *
+ * Blocks until the HTTP request completes (typically < 1 s on good WiFi).
  * Returns true on HTTP 200, false on any error.
  *
- * @param park     Park reference, e.g. "K-1234"
+ * @param park     Park reference e.g. "US-0765"
  * @param freq_hz  Operating frequency in Hz
  * @param mode     Mode string: "SSB", "CW", "FT8", "AM", "FM"
- * @param comment  Optional comment (NULL for default)
+ * @param comment  Optional comment (NULL → default string)
  */
 bool pota_spot_wifi(const char *park, int32_t freq_hz,
                     const char *mode, const char *comment);

@@ -3,12 +3,15 @@
  *
  *  Xiegu X6100 LVGL GUI
  *
- *  POTA self-spot dialog — WiFi path
+ *  POTA self-spot dialog
  *
  *  Flow:
- *    1. Park # input     → [Park #] [SPOT] [CANCEL]
- *    2. Blocking POST    → lv_refr_now() shows "Posting..." before curl call
- *    3. Result screen    → success or failure + [OK]
+ *    Input screen  → [Park #] [Recent] [SPOT] [CANCEL]
+ *                    Recent button only shown when history exists.
+ *    Recent screen → list of up to POTA_PARKS_MAX previous parks
+ *                    Tap one → fills park_buf and returns to input screen.
+ *    Progress      → "Posting …" (blocking curl call)
+ *    Result        → success / failure + [OK]
  *
  *  KI9NG — ki9ng/x6100_gui feature/pota-spot
  */
@@ -22,6 +25,7 @@
 #include "lvgl/lvgl.h"
 #include "msg.h"
 #include "params/params.h"
+#include "pota_parks.h"
 #include "pota_spot.h"
 #include "styles.h"
 #include "textarea_window.h"
@@ -37,6 +41,7 @@ static void destruct_cb(void);
 static void key_cb(lv_event_t *e);
 
 static void btn_enter_park_cb(struct button_item_t *btn);
+static void btn_recent_cb(struct button_item_t *btn);
 static void btn_spot_cb(struct button_item_t *btn);
 static void btn_cancel_cb(struct button_item_t *btn);
 static void btn_ok_cb(struct button_item_t *btn);
@@ -44,12 +49,16 @@ static void btn_ok_cb(struct button_item_t *btn);
 static bool keyboard_ok_cb(void);
 static bool keyboard_cancel_cb(void);
 
+static void recent_item_click_cb(lv_event_t *e);
+
 /* ─── state ─────────────────────────────────────────────────────────────── */
 
 static lv_obj_t *cont_input;
+static lv_obj_t *cont_recent;
 static lv_obj_t *cont_progress;
 static lv_obj_t *cont_result;
 
+static lv_obj_t *label_callsign;
 static lv_obj_t *label_park_val;
 static lv_obj_t *label_freq_val;
 static lv_obj_t *label_posting;
@@ -60,13 +69,16 @@ static char park_buf[16];
 
 /* ─── button items + pages ──────────────────────────────────────────────── */
 
-static button_item_t btn_enter  = { .type = BTN_TEXT, .label = "Park #", .press = btn_enter_park_cb };
-static button_item_t btn_spot   = { .type = BTN_TEXT, .label = "SPOT",   .press = btn_spot_cb       };
-static button_item_t btn_cancel = { .type = BTN_TEXT, .label = "CANCEL", .press = btn_cancel_cb     };
-static button_item_t btn_ok     = { .type = BTN_TEXT, .label = "OK",     .press = btn_ok_cb         };
+static button_item_t btn_enter  = { .type = BTN_TEXT, .label = "Park #",  .press = btn_enter_park_cb };
+static button_item_t btn_recent = { .type = BTN_TEXT, .label = "Recent",  .press = btn_recent_cb     };
+static button_item_t btn_spot   = { .type = BTN_TEXT, .label = "SPOT",    .press = btn_spot_cb       };
+static button_item_t btn_cancel = { .type = BTN_TEXT, .label = "CANCEL",  .press = btn_cancel_cb     };
+static button_item_t btn_ok     = { .type = BTN_TEXT, .label = "OK",      .press = btn_ok_cb         };
 
-static buttons_page_t page_input  = {{ &btn_enter, &btn_spot, &btn_cancel }};
-static buttons_page_t page_result = {{ &btn_ok }};
+/* Two input pages: with and without Recent button */
+static buttons_page_t page_input_hist  = {{ &btn_enter, &btn_recent, &btn_spot, &btn_cancel }};
+static buttons_page_t page_input_plain = {{ &btn_enter, &btn_spot, &btn_cancel }};
+static buttons_page_t page_result      = {{ &btn_ok }};
 
 /* ─── dialog descriptor ─────────────────────────────────────────────────── */
 
@@ -98,8 +110,8 @@ static const char *mode_str(void) {
 }
 
 static void show_only(lv_obj_t *visible) {
-    lv_obj_t *all[] = { cont_input, cont_progress, cont_result };
-    for (int i = 0; i < 3; i++) {
+    lv_obj_t *all[] = { cont_input, cont_recent, cont_progress, cont_result };
+    for (int i = 0; i < 4; i++) {
         if (all[i] == visible)
             lv_obj_clear_flag(all[i], LV_OBJ_FLAG_HIDDEN);
         else
@@ -120,7 +132,7 @@ static void btn_spot_cb(struct button_item_t *btn) {
     int32_t     freq_hz = subject_get_int(cfg_cur.fg_freq);
     const char *mode    = mode_str();
 
-    /* Show "Posting..." and flush the display before blocking */
+    /* Show "Posting..." and flush display before blocking curl call */
     show_only(cont_progress);
     char posting_buf[64];
     snprintf(posting_buf, sizeof(posting_buf),
@@ -129,10 +141,8 @@ static void btn_spot_cb(struct button_item_t *btn) {
     lv_label_set_text(label_posting, posting_buf);
     lv_refr_now(lv_disp_get_default());
 
-    /* Blocking HTTP POST (typically < 1 second on good WiFi) */
     bool ok = pota_spot_wifi(park_buf, freq_hz, mode, NULL);
 
-    /* Show result */
     if (ok) {
         char res_buf[48];
         snprintf(res_buf, sizeof(res_buf),
@@ -142,12 +152,11 @@ static void btn_spot_cb(struct button_item_t *btn) {
     } else if (wifi_get_status() != WIFI_CONNECTED) {
         lv_label_set_text(label_result, LV_SYMBOL_CLOSE "  No WiFi");
         lv_label_set_text(label_result_detail,
-            "Connect WiFi and try again.\n"
-            "(FT8/SOTAmat path: coming soon)");
+            "Connect WiFi and try again.");
     } else {
         lv_label_set_text(label_result, LV_SYMBOL_CLOSE "  API error");
         lv_label_set_text(label_result_detail,
-            "POTA API returned an error.\nTry again.");
+            "POTA API returned an error.\nCheck callsign & park ref.");
     }
 
     show_only(cont_result);
@@ -175,9 +184,65 @@ static void btn_enter_park_cb(struct button_item_t *btn) {
         "abcdefghijklmnopqrstuvwxyz"
         "-");
     lv_textarea_set_max_length(ta, 10);
-    lv_textarea_set_placeholder_text(ta, "K-1234");
+    lv_textarea_set_placeholder_text(ta, "US-0765");
     if (strlen(park_buf) > 0)
         textarea_window_set(park_buf);
+}
+
+static void btn_recent_cb(struct button_item_t *btn) {
+    (void)btn;
+
+    /* Rebuild the recent list every time in case it changed */
+    lv_obj_clean(cont_recent);
+
+    lv_obj_t *title = lv_label_create(cont_recent);
+    lv_label_set_text(title, "Recent Parks");
+    lv_obj_set_style_text_font(title, &sony_18, 0);
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    lv_obj_set_style_pad_bottom(title, 10, 0);
+
+    int n = pota_parks_count();
+    for (int i = 0; i < n; i++) {
+        const char *park = pota_parks_get(i);
+        lv_obj_t *btn_p = lv_btn_create(cont_recent);
+        lv_obj_set_width(btn_p, 200);
+        lv_obj_set_style_bg_color(btn_p, lv_color_hex(0x1C3A5E), 0);
+        lv_obj_set_style_bg_opa(btn_p, LV_OPA_80, 0);
+        lv_obj_set_style_border_width(btn_p, 1, 0);
+        lv_obj_set_style_border_color(btn_p, lv_color_hex(0x4A7FC1), 0);
+        lv_obj_set_style_pad_ver(btn_p, 6, 0);
+
+        lv_obj_t *lbl = lv_label_create(btn_p);
+        lv_label_set_text(lbl, park);
+        lv_obj_set_style_text_font(lbl, &sony_18, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+        lv_obj_center(lbl);
+
+        /* Store index as user data so the callback knows which park was tapped */
+        lv_obj_set_user_data(btn_p, (void *)(intptr_t)i);
+        lv_obj_add_event_cb(btn_p, recent_item_click_cb, LV_EVENT_CLICKED, NULL);
+    }
+
+    show_only(cont_recent);
+    /* No button bar change — CANCEL still works via key_cb ESC */
+}
+
+/* ─── recent item click ─────────────────────────────────────────────────── */
+
+static void recent_item_click_cb(lv_event_t *e) {
+    lv_obj_t *btn_p = lv_event_get_target(e);
+    int idx = (int)(intptr_t)lv_obj_get_user_data(btn_p);
+
+    const char *park = pota_parks_get(idx);
+    if (park) {
+        strncpy(park_buf, park, sizeof(park_buf) - 1);
+        park_buf[sizeof(park_buf) - 1] = '\0';
+        lv_label_set_text(label_park_val, park_buf);
+    }
+
+    show_only(cont_input);
+    int n = pota_parks_count();
+    buttons_load_page(n > 0 ? &page_input_hist : &page_input_plain);
 }
 
 /* ─── keyboard callbacks ────────────────────────────────────────────────── */
@@ -190,6 +255,7 @@ static bool keyboard_ok_cb(void) {
     }
     strncpy(park_buf, val, sizeof(park_buf) - 1);
     park_buf[sizeof(park_buf) - 1] = '\0';
+    /* Normalize to upper-case */
     for (char *c = park_buf; *c; c++)
         if (*c >= 'a' && *c <= 'z') *c -= 32;
 
@@ -205,7 +271,6 @@ static bool keyboard_cancel_cb(void) {
 
 /* ─── construct / destruct / key ────────────────────────────────────────── */
 
-/* helper to build a full-area transparent container with centered column flex */
 static lv_obj_t *make_container(lv_obj_t *parent) {
     lv_obj_t *c = lv_obj_create(parent);
     lv_obj_set_size(c, 400, 280);
@@ -233,10 +298,19 @@ static void construct_cb(lv_obj_t *parent) {
     lv_obj_set_style_text_font(title, &sony_18, 0);
     lv_obj_set_style_text_color(title, lv_color_white(), 0);
 
+    /* Show which callsign will be used */
+    label_callsign = lv_label_create(cont_input);
+    char cs_buf[32];
+    snprintf(cs_buf, sizeof(cs_buf), "Call: %s",
+             params.callsign.x[0] ? params.callsign.x : "—not set—");
+    lv_label_set_text(label_callsign, cs_buf);
+    lv_obj_set_style_text_color(label_callsign, lv_color_hex(0x4A7FC1), 0);
+    lv_obj_set_style_pad_top(label_callsign, 8, 0);
+
     lv_obj_t *park_lbl = lv_label_create(cont_input);
     lv_label_set_text(park_lbl, "Park:");
     lv_obj_set_style_text_color(park_lbl, lv_color_hex(0xC0C0C0), 0);
-    lv_obj_set_style_pad_top(park_lbl, 16, 0);
+    lv_obj_set_style_pad_top(park_lbl, 12, 0);
 
     label_park_val = lv_label_create(cont_input);
     lv_label_set_text(label_park_val, "— tap Park # to set —");
@@ -250,6 +324,11 @@ static void construct_cb(lv_obj_t *parent) {
     lv_label_set_text(label_freq_val, buf);
     lv_obj_set_style_text_color(label_freq_val, lv_color_hex(0x808080), 0);
     lv_obj_set_style_pad_top(label_freq_val, 8, 0);
+
+    /* ── Recent parks screen ── */
+    cont_recent = make_container(dialog.obj);
+    lv_obj_add_flag(cont_recent, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(cont_recent, LV_OBJ_FLAG_HIDDEN);
 
     /* ── Progress screen ── */
     cont_progress = make_container(dialog.obj);
@@ -277,7 +356,9 @@ static void construct_cb(lv_obj_t *parent) {
     lv_obj_set_style_text_align(label_result_detail, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_pad_top(label_result_detail, 12, 0);
 
-    buttons_load_page(&page_input);
+    /* Load correct input button page depending on history */
+    int n = pota_parks_count();
+    buttons_load_page(n > 0 ? &page_input_hist : &page_input_plain);
 }
 
 static void destruct_cb(void) {
@@ -286,6 +367,14 @@ static void destruct_cb(void) {
 
 static void key_cb(lv_event_t *e) {
     uint32_t key = *((uint32_t *)lv_event_get_param(e));
-    if (key == LV_KEY_ESC)
-        dialog_destruct();
+    if (key == LV_KEY_ESC) {
+        /* If on recent screen, go back to input rather than closing */
+        if (!lv_obj_has_flag(cont_recent, LV_OBJ_FLAG_HIDDEN)) {
+            show_only(cont_input);
+            int n = pota_parks_count();
+            buttons_load_page(n > 0 ? &page_input_hist : &page_input_plain);
+        } else {
+            dialog_destruct();
+        }
+    }
 }
