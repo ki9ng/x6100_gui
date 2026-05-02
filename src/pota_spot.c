@@ -70,7 +70,7 @@ bool pota_spot_wifi(const char *park, int32_t freq_hz,
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS,     body);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER,     headers);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT,        HTTP_TIMEOUT_SEC);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,  discard_response);
 
     CURLcode res = curl_easy_perform(curl);
