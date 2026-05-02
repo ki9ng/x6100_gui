@@ -295,8 +295,7 @@ static button_item_t btn_callsign = make_action_btn("Callsign", ACTION_APP_CALLS
 static button_item_t btn_settings = make_app_btn("Settings", ACTION_APP_SETTINGS);
 
 static button_item_t  btn_wifi      = make_app_btn("WiFi",      ACTION_APP_WIFI);
-static button_item_t  btn_pota_spot = make_app_btn("POTA
-Spot", ACTION_APP_POTA_SPOT);
+static button_item_t  btn_pota_spot = make_app_btn("POTA\nSpot", ACTION_APP_POTA_SPOT);
 
 /* RTTY */
 static button_item_t btn_rtty_p1 = {
