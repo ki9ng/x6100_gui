@@ -48,6 +48,7 @@ void dialog_destruct() {
 
         if (current_dialog->obj) {
             lv_obj_del(current_dialog->obj);
+            current_dialog->obj = NULL;
         }
         buttons_unload_page();
         if (current_dialog->prev_page) {

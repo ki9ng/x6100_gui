@@ -154,7 +154,8 @@ static void btn_new_park_cb(struct button_item_t *btn) {
 static void btn_nearby_cb(struct button_item_t *btn) {
     (void)btn;
     in_nearby = true;
-    lv_obj_add_flag(dialog.obj, LV_OBJ_FLAG_HIDDEN);
+    if (dialog.obj)
+        lv_obj_add_flag(dialog.obj, LV_OBJ_FLAG_HIDDEN);
     dialog_construct(dialog_pota_nearby, lv_scr_act());
 }
 
