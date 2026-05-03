@@ -996,6 +996,8 @@ static void spectrum_pressed_cb(lv_event_t * e) {
 }
 
 static void keys_enable_cb(lv_timer_t *t) {
+    /* Don't steal focus from a dialog that opened while the timer was pending */
+    if (dialog_is_run()) return;
     lv_group_add_obj(keyboard_group, spectrum);
     lv_group_set_editing(keyboard_group, true);
 }
