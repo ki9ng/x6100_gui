@@ -121,9 +121,12 @@ static void btn_new_park_cb(struct button_item_t *btn) {
     (void)btn;
     in_textarea = true;
 
-    /* Replace dialog with textarea_window — same pattern as dialog_callsign */
-    lv_obj_del(dialog.obj);
-    dialog.obj = textarea_window_open(textarea_ok_cb, textarea_cancel_cb);
+    /* Hide the dialog — textarea_window creates its own overlay on top.
+     * Do NOT lv_obj_del here; we are inside a button callback on dialog.obj
+     * and deleting it now causes a use-after-free crash. */
+    lv_obj_add_flag(dialog.obj, LV_OBJ_FLAG_HIDDEN);
+
+    textarea_window_open(textarea_ok_cb, textarea_cancel_cb);
 
     lv_obj_t *ta = textarea_window_text();
     lv_textarea_set_accepted_chars(ta,
@@ -150,24 +153,28 @@ static bool textarea_ok_cb(void) {
         return false;
     }
 
-    /* Normalize to upper-case */
+    /* Normalize to upper-case into a local buffer before closing the window,
+     * since textarea_window_close() frees the underlying string. */
     char park[16];
     strncpy(park, val, sizeof(park) - 1);
     park[sizeof(park) - 1] = '\0';
     for (char *c = park; *c; c++)
         if (*c >= 'a' && *c <= 'z') *c -= 32;
 
-    textarea_window_close();
+    /* textarea_window.c ok() wrapper calls close after we return true —
+     * don't call it ourselves or it double-frees. */
     in_textarea = false;
 
-    do_spot(park);
+    do_spot(park);   /* spots then calls dialog_destruct */
     return true;
 }
 
 static bool textarea_cancel_cb(void) {
-    textarea_window_close();
+    /* textarea_window.c cancel() wrapper calls close after this returns.
+     * Just unhide the dialog and return — do NOT destruct. */
     in_textarea = false;
-    dialog_destruct(&dialog);
+    if (dialog.obj)
+        lv_obj_clear_flag(dialog.obj, LV_OBJ_FLAG_HIDDEN);
     return true;
 }
 
@@ -231,6 +238,7 @@ static void destruct_cb(void) {
         textarea_window_close();
         in_textarea = false;
     }
+    dialog.obj = NULL;
 }
 
 static void key_cb(lv_event_t *e) {
