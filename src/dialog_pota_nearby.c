@@ -5,18 +5,6 @@
  *
  *  POTA Nearby dialog — GPS-sorted park list → MFK knob select → press to confirm.
  *
- *  UX:
- *    Turn MFK  → moves focus between buttons (navigate mode, editing=false).
- *                enc_diff → next/prev object in keyboard_group.
- *    Press MFK → fires LV_EVENT_CLICKED on focused button → row_click_cb
- *                → pota_parks_add + dialog_destruct + dialog_pota_spot_return.
- *    ESC       → dismiss without selection, return to spot dialog.
- *
- *  NOTE: editing=true was incorrect — for non-editable buttons it sends
- *  LV_KEY_UP/DOWN (no effect on buttons) instead of moving group focus.
- *  Navigate mode (editing=false) moves focus on enc_diff AND fires
- *  LV_EVENT_CLICKED on press for non-editable objects. No mode switch needed.
- *
  *  KI9NG — ki9ng/x6100_gui feature/pota-spot
  */
 
@@ -113,20 +101,25 @@ static void construct_cb(lv_obj_t *parent) {
         return;
     }
 
+    /* Create the dialog container — dialog_destruct() calls lv_obj_del on
+     * dialog.obj, which destroys all children. Without this every widget
+     * would be parented to lv_scr_act() and never cleaned up. */
+    dialog.obj = dialog_init(parent);
+
     /* ── title ────────────────────────────────────────────────────────── */
-    lv_obj_t *title = lv_label_create(parent);
+    lv_obj_t *title = lv_label_create(dialog.obj);
     lv_label_set_text_fmt(title, "Nearby Parks  (%.4f, %.4f)", lat, lon);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 8, 6);
 
-    lv_obj_t *hint = lv_label_create(parent);
+    lv_obj_t *hint = lv_label_create(dialog.obj);
     lv_label_set_text(hint, "MFK: scroll  \xE2\x80\xA2  Press: select");
     lv_obj_set_style_text_color(hint, lv_color_hex(0x808080), 0);
     lv_obj_align(hint, LV_ALIGN_TOP_RIGHT, -8, 6);
 
     /* ── scrollable list ──────────────────────────────────────────────── */
-    lv_obj_t *list = lv_list_create(parent);
-    lv_obj_set_size(list, lv_obj_get_width(parent) - 16,
-                    lv_obj_get_height(parent) - 40);
+    lv_obj_t *list = lv_list_create(dialog.obj);
+    lv_obj_set_size(list, lv_obj_get_width(dialog.obj) - 16,
+                    lv_obj_get_height(dialog.obj) - 40);
     lv_obj_align(list, LV_ALIGN_TOP_LEFT, 8, 34);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
 
@@ -154,8 +147,6 @@ static void construct_cb(lv_obj_t *parent) {
         if (i == 0) first_btn = btn;
     }
 
-    /* Stay in navigate mode (editing=false) — enc_diff moves focus between
-     * buttons, and press fires LV_EVENT_CLICKED on non-editable buttons. */
     if (first_btn)
         lv_group_focus_obj(first_btn);
 }
