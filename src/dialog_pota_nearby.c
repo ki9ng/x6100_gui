@@ -3,25 +3,25 @@
  *
  *  Xiegu X6100 LVGL GUI
  *
- *  POTA Nearby dialog — GPS-sorted park list → one-press spot.
+ *  POTA Nearby dialog — GPS-sorted park list → MFK knob select → press to spot.
  *  KI9NG — ki9ng/x6100_gui feature/pota-spot
  *
  *  UX:
  *    Opens only when GPS has a fix. Reads fix at open time. Sorts all parks
  *    by distance. Shows a rotary-scrollable list:
  *
- *      K-1234  Jasper-Pulaski  14.2 km
+ *      K-1234  Jasper-Pulaski  14.2 km   ← highlighted row
  *      K-4321  Kankakee River  38.1 km
  *      ...
  *
- *    Select a row → spot that park immediately (same path as manual entry).
+ *    Turn MFK knob → move highlight up/down.
+ *    Press MFK knob → spot selected park (same path as manual entry).
  *    ESC / back → dismiss.
  */
 
 #include "dialog_pota_nearby.h"
 
 #include "dialog.h"
-#include "keyboard.h"
 #include "pota_db.h"
 #include "pota_spot.h"
 #include "wifi.h"
@@ -46,6 +46,7 @@
 static void construct_cb(lv_obj_t *parent);
 static void destruct_cb(void);
 static void key_cb(lv_event_t *e);
+static void rotary_cb(int32_t diff);
 
 /* ── dialog descriptor ─────────────────────────────────────────────────── */
 
@@ -54,6 +55,7 @@ static dialog_t dialog = {
     .construct_cb = construct_cb,
     .destruct_cb  = destruct_cb,
     .audio_cb     = NULL,
+    .rotary_cb    = rotary_cb,
     .key_cb       = key_cb,
 };
 
@@ -63,7 +65,25 @@ dialog_t *dialog_pota_nearby = &dialog;
 
 static pota_db_entry_t  *results    = NULL;
 static int               results_n  = 0;
+static int               selected   = 0;   /* currently highlighted row */
 static lv_obj_t         *list       = NULL;
+
+/* ── highlight selected row ────────────────────────────────────────────── */
+
+static void update_highlight(void) {
+    if (!list) return;
+    uint32_t count = lv_obj_get_child_cnt(list);
+    for (uint32_t i = 0; i < count; i++) {
+        lv_obj_t *btn = lv_obj_get_child(list, i);
+        if ((int)i == selected) {
+            lv_obj_add_state(btn, LV_STATE_FOCUSED);
+            /* Scroll the list so the selected row is visible */
+            lv_obj_scroll_to_view(btn, LV_ANIM_ON);
+        } else {
+            lv_obj_clear_state(btn, LV_STATE_FOCUSED);
+        }
+    }
+}
 
 /* ── spot a selected park ──────────────────────────────────────────────── */
 
@@ -83,14 +103,6 @@ static void do_spot(const char *park) {
     }
 
     dialog_destruct();
-}
-
-/* ── row click callback ────────────────────────────────────────────────── */
-
-static void row_click_cb(lv_event_t *e) {
-    lv_obj_t   *btn  = lv_event_get_target(e);
-    const char *park = (const char *)lv_obj_get_user_data(btn);
-    if (park) do_spot(park);
 }
 
 /* ── construct ─────────────────────────────────────────────────────────── */
@@ -114,6 +126,7 @@ static void construct_cb(lv_obj_t *parent) {
 
     /* ── sort parks ──────────────────────────────────────────────────── */
     results_n = 0;
+    selected  = 0;
     if (results) { free(results); results = NULL; }
     results = malloc(MAX_ROWS * sizeof(pota_db_entry_t));
     if (!results) {
@@ -133,6 +146,12 @@ static void construct_cb(lv_obj_t *parent) {
     lv_obj_t *title = lv_label_create(parent);
     lv_label_set_text_fmt(title, "Nearby Parks  (%.4f, %.4f)", lat, lon);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 8, 6);
+
+    /* ── hint label ──────────────────────────────────────────────────── */
+    lv_obj_t *hint = lv_label_create(parent);
+    lv_label_set_text(hint, "Turn MFK to select  •  Press to spot");
+    lv_obj_set_style_text_color(hint, lv_color_hex(0x808080), 0);
+    lv_obj_align(hint, LV_ALIGN_TOP_RIGHT, -8, 6);
 
     /* ── scrollable list ─────────────────────────────────────────────── */
     list = lv_list_create(parent);
@@ -155,10 +174,10 @@ static void construct_cb(lv_obj_t *parent) {
 
         lv_obj_t *btn = lv_list_add_btn(list, NULL, label);
         lv_obj_set_user_data(btn, (void *)results[i].ref);
-        lv_obj_add_event_cb(btn, row_click_cb, LV_EVENT_CLICKED, NULL);
-        /* Add to keyboard group so rotary encoder can scroll and select */
-        lv_group_add_obj(keyboard_group, btn);
     }
+
+    /* Highlight first row */
+    update_highlight();
 }
 
 /* ── destruct ──────────────────────────────────────────────────────────── */
@@ -166,17 +185,37 @@ static void construct_cb(lv_obj_t *parent) {
 static void destruct_cb(void) {
     list      = NULL;
     results_n = 0;
+    selected  = 0;
     if (results) { free(results); results = NULL; }
 }
 
-/* ── key handler ───────────────────────────────────────────────────────── */
+/* ── rotary handler — MFK knob turn ────────────────────────────────────── */
+
+static void rotary_cb(int32_t diff) {
+    if (results_n == 0) return;
+
+    selected += (diff > 0) ? 1 : -1;
+
+    if (selected < 0)           selected = 0;
+    if (selected >= results_n)  selected = results_n - 1;
+
+    update_highlight();
+}
+
+/* ── key handler — MFK knob press = ENTER, back = ESC ──────────────────── */
 
 static void key_cb(lv_event_t *e) {
     uint32_t key = *((uint32_t *)lv_event_get_param(e));
     switch (key) {
+        case LV_KEY_ENTER:
+            if (results && selected >= 0 && selected < results_n)
+                do_spot(results[selected].ref);
+            break;
+
         case LV_KEY_ESC:
             dialog_destruct();
             break;
+
         default:
             break;
     }
