@@ -5,14 +5,6 @@
  *
  *  POTA self-spot dialog
  *
- *  UI:
- *    Main screen — park history list (tap any park → spots immediately)
- *                  [New Park] [Nearby] [Cancel] buttons
- *    New park    — textarea_window overlay, on OK spots and closes.
- *    Nearby      — hides this dialog, opens dialog_pota_nearby on top.
- *                  Nearby calls dialog_pota_spot_return() on close,
- *                  which destructs+reconstructs spot fresh.
- *
  *  KI9NG — ki9ng/x6100_gui feature/pota-spot
  */
 
@@ -50,13 +42,13 @@ static bool textarea_ok_cb(void);
 static bool textarea_cancel_cb(void);
 
 static void do_spot(const char *park);
+static void rebuild_list(void);
 
 /* ─── state ─────────────────────────────────────────────────────────────── */
 
-static lv_obj_t        *list            = NULL;
-static bool             in_textarea     = false;
-static bool             in_nearby       = false;
-static buttons_page_t  *origin_page     = NULL; /* page active before spot opened */
+static lv_obj_t *list        = NULL;
+static bool      in_textarea = false;
+static bool      in_nearby   = false;
 
 /* ─── buttons ───────────────────────────────────────────────────────────── */
 
@@ -75,6 +67,7 @@ static dialog_t dialog = {
     .audio_cb     = NULL,
     .rotary_cb    = NULL,
     .key_cb       = key_cb,
+    .btn_page     = &page_main,   /* dialog_construct/destruct handles buttons */
 };
 
 dialog_t *dialog_pota_spot = &dialog;
@@ -89,23 +82,51 @@ static void do_spot(const char *park) {
 
     bool ok = pota_spot_wifi(park, freq_hz, mode, NULL);
 
-    if (ok) {
+    if (ok)
         msg_schedule_text_fmt("%s spotted! Check pota.app", park);
-    } else if (wifi_get_status() != WIFI_CONNECTED) {
+    else if (wifi_get_status() != WIFI_CONNECTED)
         msg_schedule_text_fmt("No WiFi — spot failed");
-    } else {
+    else
         msg_schedule_text_fmt("POTA API error — check callsign");
-    }
 
     dialog_destruct();
 }
 
-/* ─── list item click ───────────────────────────────────────────────────── */
+/* ─── list population ───────────────────────────────────────────────────── */
 
 static void list_btn_click_cb(lv_event_t *e) {
     lv_obj_t   *btn  = lv_event_get_target(e);
     const char *park = (const char *)lv_obj_get_user_data(btn);
     if (park) do_spot(park);
+}
+
+static void rebuild_list(void) {
+    lv_obj_clean(list);
+
+    int n = pota_parks_count();
+
+    for (int i = 0; i < n; i++) {
+        const char *park = pota_parks_get(i);
+        lv_obj_t   *b    = lv_list_add_btn(list, NULL, park);
+
+        lv_obj_set_style_text_font(b, &sony_22, 0);
+        lv_obj_set_style_text_color(b, lv_color_white(), 0);
+        lv_obj_set_style_bg_color(b, lv_color_hex(0x1C3A5E), 0);
+        lv_obj_set_style_bg_color(b, lv_color_hex(0x2E5F9E), LV_STATE_FOCUSED);
+        lv_obj_set_style_bg_opa(b, LV_OPA_80, 0);
+        lv_obj_set_style_pad_ver(b, 10, 0);
+
+        lv_obj_set_user_data(b, (void *)park);
+        lv_obj_add_event_cb(b, list_btn_click_cb, LV_EVENT_CLICKED, NULL);
+        lv_group_add_obj(keyboard_group, b);
+    }
+
+    if (n == 0) {
+        lv_obj_t *empty = lv_label_create(list);
+        lv_label_set_text(empty, "—");
+        lv_obj_set_style_text_color(empty, lv_color_hex(0x606060), 0);
+        lv_obj_center(empty);
+    }
 }
 
 /* ─── button callbacks ──────────────────────────────────────────────────── */
@@ -130,14 +151,15 @@ static void btn_new_park_cb(struct button_item_t *btn) {
 static void btn_nearby_cb(struct button_item_t *btn) {
     (void)btn;
     in_nearby = true;
+    /* Hide but do NOT destruct — we are inside a button callback on dialog.obj.
+     * dialog_construct(nearby) will save cur_page=&page_main as nearby->prev_page
+     * and restore it when nearby closes, so our buttons come back automatically. */
     lv_obj_add_flag(dialog.obj, LV_OBJ_FLAG_HIDDEN);
     dialog_construct(dialog_pota_nearby, lv_scr_act());
 }
 
 static void btn_cancel_cb(struct button_item_t *btn) {
     (void)btn;
-    /* Restore the page that was active before we were opened, then destruct. */
-    dialog.prev_page = origin_page;
     dialog_destruct();
 }
 
@@ -145,12 +167,11 @@ static void btn_cancel_cb(struct button_item_t *btn) {
 
 void dialog_pota_spot_return(void) {
     in_nearby = false;
-    /* Preserve origin_page across the destruct+reconstruct cycle. */
-    buttons_page_t *saved_origin = origin_page;
-    lv_obj_t *parent = lv_scr_act();
-    dialog_destruct();
-    origin_page = saved_origin;
-    dialog_construct(dialog_pota_spot, parent);
+    /* The spot dialog was only hidden — nearby's dialog_destruct already
+     * restored cur_page to &page_main. Just unhide, refresh the list, and
+     * we're back. No destruct/reconstruct needed. */
+    rebuild_list();
+    lv_obj_clear_flag(dialog.obj, LV_OBJ_FLAG_HIDDEN);
 }
 
 /* ─── textarea callbacks ────────────────────────────────────────────────── */
@@ -187,19 +208,12 @@ static void construct_cb(lv_obj_t *parent) {
     in_textarea = false;
     in_nearby   = false;
 
-    /* Capture the page that was active before dialog_construct saved/cleared
-     * it — dialog_construct saves prev_page = buttons_get_cur_page() before
-     * calling us, but then unloads it. We re-read dialog.prev_page which was
-     * set by dialog_construct. Only store it when this is a fresh open (not
-     * a return from nearby). */
-    if (origin_page == NULL) {
-        origin_page = dialog.prev_page;
-    }
-
     int n = pota_parks_count();
 
     lv_obj_t *title = lv_label_create(dialog.obj);
-    lv_label_set_text(title, n > 0 ? "Select Park or tap New Park" : "No recent parks — tap New Park");
+    lv_label_set_text(title, n > 0
+        ? "Select Park or tap New Park"
+        : "No recent parks — tap New Park");
     lv_obj_set_style_text_color(title, lv_color_hex(0xC0C0C0), 0);
     lv_obj_set_style_pad_all(title, 8, 0);
     lv_obj_set_width(title, 400);
@@ -213,30 +227,7 @@ static void construct_cb(lv_obj_t *parent) {
     lv_obj_set_style_border_width(list, 0, 0);
     lv_obj_set_style_pad_all(list, 4, 0);
 
-    for (int i = 0; i < n; i++) {
-        const char *park = pota_parks_get(i);
-
-        lv_obj_t *b = lv_list_add_btn(list, NULL, park);
-        lv_obj_set_style_text_font(b, &sony_22, 0);
-        lv_obj_set_style_text_color(b, lv_color_white(), 0);
-        lv_obj_set_style_bg_color(b, lv_color_hex(0x1C3A5E), 0);
-        lv_obj_set_style_bg_color(b, lv_color_hex(0x2E5F9E), LV_STATE_FOCUSED);
-        lv_obj_set_style_bg_opa(b, LV_OPA_80, 0);
-        lv_obj_set_style_pad_ver(b, 10, 0);
-
-        lv_obj_set_user_data(b, (void *)park);
-        lv_obj_add_event_cb(b, list_btn_click_cb, LV_EVENT_CLICKED, NULL);
-        lv_group_add_obj(keyboard_group, b);
-    }
-
-    if (n == 0) {
-        lv_obj_t *empty = lv_label_create(list);
-        lv_label_set_text(empty, "—");
-        lv_obj_set_style_text_color(empty, lv_color_hex(0x606060), 0);
-        lv_obj_center(empty);
-    }
-
-    buttons_load_page(&page_main);
+    rebuild_list();
 }
 
 static void destruct_cb(void) {
@@ -244,10 +235,7 @@ static void destruct_cb(void) {
         textarea_window_close();
         in_textarea = false;
     }
-    /* Clear origin_page only on a true close (not a nearby round-trip). */
-    if (!in_nearby) {
-        origin_page = NULL;
-    }
+    list = NULL;
 }
 
 static void key_cb(lv_event_t *e) {
@@ -259,7 +247,6 @@ static void key_cb(lv_event_t *e) {
                 textarea_window_close();
                 in_textarea = false;
             }
-            dialog.prev_page = origin_page;
             dialog_destruct();
             break;
 
