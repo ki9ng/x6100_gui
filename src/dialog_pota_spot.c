@@ -7,9 +7,13 @@
  *
  *  UI:
  *    Main screen — park history list (tap any park → spots immediately)
- *                  [New Park] [Cancel] buttons
+ *                  [New Park] [Nearby] [Cancel] buttons
  *    New park    — textarea_window (same pattern as dialog_callsign)
  *                  on OK → spots and closes
+ *    Nearby      — hides this dialog, opens dialog_pota_nearby on top.
+ *                  When nearby closes it calls dialog_pota_spot_return()
+ *                  which destructs this dialog and re-constructs it fresh
+ *                  (so the park added by nearby appears at top of list).
  *
  *  KI9NG — ki9ng/x6100_gui feature/pota-spot
  */
@@ -51,14 +55,15 @@ static void do_spot(const char *park);
 
 /* ─── state ─────────────────────────────────────────────────────────────── */
 
-static lv_obj_t *list;
+static lv_obj_t *list        = NULL;
 static bool      in_textarea = false;
+static bool      in_nearby   = false;   /* true while nearby dialog is on top */
 
 /* ─── buttons ───────────────────────────────────────────────────────────── */
 
-static button_item_t btn_new    = { .type = BTN_TEXT, .label = "New Park",    .press = btn_new_park_cb };
-static button_item_t btn_nearby = { .type = BTN_TEXT, .label = "Nearby Parks", .press = btn_nearby_cb    };
-static button_item_t btn_cncl = { .type = BTN_TEXT, .label = "Cancel",   .press = btn_cancel_cb  };
+static button_item_t btn_new    = { .type = BTN_TEXT, .label = "New Park",     .press = btn_new_park_cb };
+static button_item_t btn_nearby = { .type = BTN_TEXT, .label = "Nearby Parks", .press = btn_nearby_cb   };
+static button_item_t btn_cncl   = { .type = BTN_TEXT, .label = "Cancel",       .press = btn_cancel_cb   };
 
 static buttons_page_t page_main = {{ &btn_new, &btn_nearby, NULL, NULL, &btn_cncl }};
 
@@ -75,9 +80,7 @@ static dialog_t dialog = {
 
 dialog_t *dialog_pota_spot = &dialog;
 
-/* ─── helpers ───────────────────────────────────────────────────────────── */
-
-
+/* ─── spot helper ───────────────────────────────────────────────────────── */
 
 static void do_spot(const char *park) {
     int32_t     freq_hz = subject_get_int(cfg_cur.fg_freq);
@@ -113,8 +116,7 @@ static void btn_new_park_cb(struct button_item_t *btn) {
     in_textarea = true;
 
     /* Hide the dialog — textarea_window creates its own overlay on top.
-     * Do NOT lv_obj_del here; we are inside a button callback on dialog.obj
-     * and deleting it now causes a use-after-free crash. */
+     * Do NOT lv_obj_del here; we are inside a button callback on dialog.obj. */
     lv_obj_add_flag(dialog.obj, LV_OBJ_FLAG_HIDDEN);
 
     textarea_window_open(textarea_ok_cb, textarea_cancel_cb);
@@ -132,13 +134,28 @@ static void btn_new_park_cb(struct button_item_t *btn) {
 
 static void btn_nearby_cb(struct button_item_t *btn) {
     (void)btn;
-    dialog_destruct();
+    in_nearby = true;
+
+    /* Hide this dialog rather than destroying it — we are inside a button
+     * callback on dialog.obj, destroying it here causes use-after-free. */
+    lv_obj_add_flag(dialog.obj, LV_OBJ_FLAG_HIDDEN);
+
     dialog_construct(dialog_pota_nearby, lv_scr_act());
 }
 
 static void btn_cancel_cb(struct button_item_t *btn) {
     (void)btn;
     dialog_destruct();
+}
+
+/* ─── called by dialog_pota_nearby when it closes ──────────────────────── */
+
+void dialog_pota_spot_return(void) {
+    /* Nearby has closed. Destruct+reconstruct spot so the park list refreshes. */
+    in_nearby = false;
+    lv_obj_t *parent = lv_scr_act();
+    dialog_destruct();
+    dialog_construct(dialog_pota_spot, parent);
 }
 
 /* ─── textarea callbacks ────────────────────────────────────────────────── */
@@ -150,25 +167,19 @@ static bool textarea_ok_cb(void) {
         return false;
     }
 
-    /* Normalize to upper-case into a local buffer before closing the window,
-     * since textarea_window_close() frees the underlying string. */
     char park[16];
     strncpy(park, val, sizeof(park) - 1);
     park[sizeof(park) - 1] = '\0';
     for (char *c = park; *c; c++)
         if (*c >= 'a' && *c <= 'z') *c -= 32;
 
-    /* textarea_window.c ok() wrapper calls close after we return true —
-     * don't call it ourselves or it double-frees. */
     in_textarea = false;
 
-    do_spot(park);   /* spots then calls dialog_destruct */
+    do_spot(park);
     return true;
 }
 
 static bool textarea_cancel_cb(void) {
-    /* textarea_window.c cancel() wrapper calls close after this returns.
-     * Just unhide the dialog and return — do NOT destruct. */
     in_textarea = false;
     if (dialog.obj)
         lv_obj_clear_flag(dialog.obj, LV_OBJ_FLAG_HIDDEN);
@@ -180,10 +191,10 @@ static bool textarea_cancel_cb(void) {
 static void construct_cb(lv_obj_t *parent) {
     dialog.obj = dialog_init(parent);
     in_textarea = false;
+    in_nearby   = false;
 
     int n = pota_parks_count();
 
-    /* Header label */
     lv_obj_t *title = lv_label_create(dialog.obj);
     lv_label_set_text(title, n > 0 ? "Select Park or tap New Park" : "No recent parks — tap New Park");
     lv_obj_set_style_text_color(title, lv_color_hex(0xC0C0C0), 0);
@@ -192,7 +203,6 @@ static void construct_cb(lv_obj_t *parent) {
     lv_label_set_long_mode(title, LV_LABEL_LONG_WRAP);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 4);
 
-    /* Scrollable park list */
     list = lv_list_create(dialog.obj);
     lv_obj_set_size(list, 380, 200);
     lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 36);
@@ -203,21 +213,18 @@ static void construct_cb(lv_obj_t *parent) {
     for (int i = 0; i < n; i++) {
         const char *park = pota_parks_get(i);
 
-        lv_obj_t *btn = lv_list_add_btn(list, NULL, park);
-        lv_obj_set_style_text_font(btn, &sony_22, 0);
-        lv_obj_set_style_text_color(btn, lv_color_white(), 0);
-        lv_obj_set_style_bg_color(btn, lv_color_hex(0x1C3A5E), 0);
-        lv_obj_set_style_bg_color(btn, lv_color_hex(0x2E5F9E), LV_STATE_FOCUSED);
-        lv_obj_set_style_bg_opa(btn, LV_OPA_80, 0);
-        lv_obj_set_style_pad_ver(btn, 10, 0);
+        lv_obj_t *b = lv_list_add_btn(list, NULL, park);
+        lv_obj_set_style_text_font(b, &sony_22, 0);
+        lv_obj_set_style_text_color(b, lv_color_white(), 0);
+        lv_obj_set_style_bg_color(b, lv_color_hex(0x1C3A5E), 0);
+        lv_obj_set_style_bg_color(b, lv_color_hex(0x2E5F9E), LV_STATE_FOCUSED);
+        lv_obj_set_style_bg_opa(b, LV_OPA_80, 0);
+        lv_obj_set_style_pad_ver(b, 10, 0);
 
-        /* Store park string pointer as user data — valid for lifetime of dialog
-         * since pota_parks strings are in static storage */
-        lv_obj_set_user_data(btn, (void *)park);
-        lv_obj_add_event_cb(btn, list_btn_click_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_set_user_data(b, (void *)park);
+        lv_obj_add_event_cb(b, list_btn_click_cb, LV_EVENT_CLICKED, NULL);
 
-        /* Add to keyboard group so rotary encoder can scroll/select */
-        lv_group_add_obj(keyboard_group, btn);
+        lv_group_add_obj(keyboard_group, b);
     }
 
     if (n == 0) {

@@ -20,17 +20,12 @@ static void encoder_input_read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
     struct input_event  in;
     encoder_t           *encoder = (encoder_t*) drv->user_data;
     int32_t             diff = 0;
-    bool                send = false;
 
     while (read(encoder->fd, &in, sizeof(struct input_event)) > 0) {
         if (in.type == EV_REL) {
             diff += in.value;
-            send = true;
+            backlight_tick();
         }
-    }
-
-    if (send) {
-        backlight_tick();
     }
 
     data->enc_diff = -diff;

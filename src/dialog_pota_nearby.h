@@ -12,3 +12,10 @@
 #include "dialog.h"
 
 extern dialog_t *dialog_pota_nearby;
+
+/**
+ * Returns the park reference chosen by the user (MFK press), or NULL if the
+ * dialog was dismissed without a selection. Valid until the next
+ * dialog_construct(dialog_pota_nearby, ...) call.
+ */
+const char *pota_nearby_get_selected(void);

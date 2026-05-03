@@ -12,4 +12,11 @@
 #include "dialog.h"
 #include "buttons.h"
 
-extern dialog_t        *dialog_pota_spot;
+extern dialog_t *dialog_pota_spot;
+
+/**
+ * Called by dialog_pota_nearby when it closes after a selection (or ESC).
+ * Destructs the hidden spot dialog and re-constructs it fresh so the
+ * newly-added park appears at the top of the history list.
+ */
+void dialog_pota_spot_return(void);
