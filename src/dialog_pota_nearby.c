@@ -8,20 +8,26 @@
  *
  *  UX:
  *    Opens only when GPS has a fix. Reads fix at open time. Sorts all parks
- *    by distance. Shows a rotary-scrollable list:
+ *    by distance. Shows an MFK-navigable list:
  *
- *      K-1234  Jasper-Pulaski  14.2 km   ← highlighted row
+ *      K-1234  Jasper-Pulaski  14.2 km   ← focused row
  *      K-4321  Kankakee River  38.1 km
  *      ...
  *
- *    Turn MFK knob → move highlight up/down.
- *    Press MFK knob → spot selected park (same path as manual entry).
+ *    Turn MFK knob → move focus up/down (LVGL encoder nav via keyboard_group).
+ *    Press MFK knob → LV_EVENT_CLICKED fires on focused btn → spot.
  *    ESC / back → dismiss.
+ *
+ *  Input routing:
+ *    MFK is encoder_init("/dev/input/event3") registered as LV_INDEV_TYPE_ENCODER
+ *    on keyboard_group. Buttons added to that group receive enc_diff nav and
+ *    press-as-click automatically — no rotary_cb needed.
  */
 
 #include "dialog_pota_nearby.h"
 
 #include "dialog.h"
+#include "keyboard.h"
 #include "pota_db.h"
 #include "pota_spot.h"
 #include "wifi.h"
@@ -39,14 +45,12 @@
 /* ── tunables ──────────────────────────────────────────────────────────── */
 
 #define MAX_ROWS    200     /* max parks shown in list */
-#define ROW_H       52      /* px per row */
 
 /* ── forward declarations ──────────────────────────────────────────────── */
 
 static void construct_cb(lv_obj_t *parent);
 static void destruct_cb(void);
 static void key_cb(lv_event_t *e);
-static void rotary_cb(int32_t diff);
 
 /* ── dialog descriptor ─────────────────────────────────────────────────── */
 
@@ -55,7 +59,7 @@ static dialog_t dialog = {
     .construct_cb = construct_cb,
     .destruct_cb  = destruct_cb,
     .audio_cb     = NULL,
-    .rotary_cb    = rotary_cb,
+    .rotary_cb    = NULL,   /* VFO knob — not used here */
     .key_cb       = key_cb,
 };
 
@@ -65,25 +69,7 @@ dialog_t *dialog_pota_nearby = &dialog;
 
 static pota_db_entry_t  *results    = NULL;
 static int               results_n  = 0;
-static int               selected   = 0;   /* currently highlighted row */
 static lv_obj_t         *list       = NULL;
-
-/* ── highlight selected row ────────────────────────────────────────────── */
-
-static void update_highlight(void) {
-    if (!list) return;
-    uint32_t count = lv_obj_get_child_cnt(list);
-    for (uint32_t i = 0; i < count; i++) {
-        lv_obj_t *btn = lv_obj_get_child(list, i);
-        if ((int)i == selected) {
-            lv_obj_add_state(btn, LV_STATE_FOCUSED);
-            /* Scroll the list so the selected row is visible */
-            lv_obj_scroll_to_view(btn, LV_ANIM_ON);
-        } else {
-            lv_obj_clear_state(btn, LV_STATE_FOCUSED);
-        }
-    }
-}
 
 /* ── spot a selected park ──────────────────────────────────────────────── */
 
@@ -103,6 +89,21 @@ static void do_spot(const char *park) {
     }
 
     dialog_destruct();
+}
+
+/* ── row click callback (fires on MFK press when btn is focused) ────────── */
+
+static void row_click_cb(lv_event_t *e) {
+    lv_obj_t   *btn  = lv_event_get_target(e);
+    const char *park = (const char *)lv_obj_get_user_data(btn);
+    if (park) do_spot(park);
+}
+
+/* ── scroll list to keep focused child visible ──────────────────────────── */
+
+static void row_focus_cb(lv_event_t *e) {
+    lv_obj_t *btn = lv_event_get_target(e);
+    lv_obj_scroll_to_view(btn, LV_ANIM_ON);
 }
 
 /* ── construct ─────────────────────────────────────────────────────────── */
@@ -126,7 +127,6 @@ static void construct_cb(lv_obj_t *parent) {
 
     /* ── sort parks ──────────────────────────────────────────────────── */
     results_n = 0;
-    selected  = 0;
     if (results) { free(results); results = NULL; }
     results = malloc(MAX_ROWS * sizeof(pota_db_entry_t));
     if (!results) {
@@ -147,9 +147,9 @@ static void construct_cb(lv_obj_t *parent) {
     lv_label_set_text_fmt(title, "Nearby Parks  (%.4f, %.4f)", lat, lon);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 8, 6);
 
-    /* ── hint label ──────────────────────────────────────────────────── */
+    /* ── hint ────────────────────────────────────────────────────────── */
     lv_obj_t *hint = lv_label_create(parent);
-    lv_label_set_text(hint, "Turn MFK to select  •  Press to spot");
+    lv_label_set_text(hint, "MFK: scroll  •  Press: spot");
     lv_obj_set_style_text_color(hint, lv_color_hex(0x808080), 0);
     lv_obj_align(hint, LV_ALIGN_TOP_RIGHT, -8, 6);
 
@@ -159,6 +159,8 @@ static void construct_cb(lv_obj_t *parent) {
                     lv_obj_get_height(parent) - 40);
     lv_obj_align(list, LV_ALIGN_TOP_LEFT, 8, 34);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
+
+    lv_obj_t *first_btn = NULL;
 
     for (int i = 0; i < results_n; i++) {
         char label[48];
@@ -173,11 +175,20 @@ static void construct_cb(lv_obj_t *parent) {
                      results[i].ref, results[i].name);
 
         lv_obj_t *btn = lv_list_add_btn(list, NULL, label);
+        /* Store a pointer into the results array — valid until destruct_cb frees it */
         lv_obj_set_user_data(btn, (void *)results[i].ref);
+        lv_obj_add_event_cb(btn, row_click_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_add_event_cb(btn, row_focus_cb, LV_EVENT_FOCUSED, NULL);
+
+        /* Register with MFK encoder group so knob turn navigates and press clicks */
+        lv_group_add_obj(keyboard_group, btn);
+
+        if (i == 0) first_btn = btn;
     }
 
-    /* Highlight first row */
-    update_highlight();
+    /* Focus the first row so the knob is ready immediately */
+    if (first_btn)
+        lv_group_focus_obj(first_btn);
 }
 
 /* ── destruct ──────────────────────────────────────────────────────────── */
@@ -185,37 +196,17 @@ static void construct_cb(lv_obj_t *parent) {
 static void destruct_cb(void) {
     list      = NULL;
     results_n = 0;
-    selected  = 0;
     if (results) { free(results); results = NULL; }
 }
 
-/* ── rotary handler — MFK knob turn ────────────────────────────────────── */
-
-static void rotary_cb(int32_t diff) {
-    if (results_n == 0) return;
-
-    selected += (diff > 0) ? 1 : -1;
-
-    if (selected < 0)           selected = 0;
-    if (selected >= results_n)  selected = results_n - 1;
-
-    update_highlight();
-}
-
-/* ── key handler — MFK knob press = ENTER, back = ESC ──────────────────── */
+/* ── key handler ────────────────────────────────────────────────────────── */
 
 static void key_cb(lv_event_t *e) {
     uint32_t key = *((uint32_t *)lv_event_get_param(e));
     switch (key) {
-        case LV_KEY_ENTER:
-            if (results && selected >= 0 && selected < results_n)
-                do_spot(results[selected].ref);
-            break;
-
         case LV_KEY_ESC:
             dialog_destruct();
             break;
-
         default:
             break;
     }
