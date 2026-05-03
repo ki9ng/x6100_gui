@@ -21,6 +21,7 @@
 #include "dialog_pota_nearby.h"
 
 #include "dialog.h"
+#include "keyboard.h"
 #include "pota_db.h"
 #include "pota_spot.h"
 #include "wifi.h"
@@ -155,6 +156,8 @@ static void construct_cb(lv_obj_t *parent) {
         lv_obj_t *btn = lv_list_add_btn(list, NULL, label);
         lv_obj_set_user_data(btn, (void *)results[i].ref);
         lv_obj_add_event_cb(btn, row_click_cb, LV_EVENT_CLICKED, NULL);
+        /* Add to keyboard group so rotary encoder can scroll and select */
+        lv_group_add_obj(keyboard_group, btn);
     }
 }
 
