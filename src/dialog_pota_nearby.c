@@ -6,9 +6,16 @@
  *  POTA Nearby dialog — GPS-sorted park list → MFK knob select → press to confirm.
  *
  *  UX:
- *    Turn MFK  → scroll list up/down (editing=true so enc_diff → UP/DOWN nav).
- *    Press MFK → adds park to history, closes nearby, returns to spot dialog.
+ *    Turn MFK  → moves focus between buttons (navigate mode, editing=false).
+ *                enc_diff → next/prev object in keyboard_group.
+ *    Press MFK → fires LV_EVENT_CLICKED on focused button → row_click_cb
+ *                → pota_parks_add + dialog_destruct + dialog_pota_spot_return.
  *    ESC       → dismiss without selection, return to spot dialog.
+ *
+ *  NOTE: editing=true was incorrect — for non-editable buttons it sends
+ *  LV_KEY_UP/DOWN (no effect on buttons) instead of moving group focus.
+ *  Navigate mode (editing=false) moves focus on enc_diff AND fires
+ *  LV_EVENT_CLICKED on press for non-editable objects. No mode switch needed.
  *
  *  KI9NG — ki9ng/x6100_gui feature/pota-spot
  */
@@ -55,29 +62,23 @@ dialog_t *dialog_pota_nearby = &dialog;
 
 static pota_db_entry_t  *results   = NULL;
 static int               results_n = 0;
-static lv_obj_t         *list      = NULL;
 
-/* ── row click: add park to history, return to spot dialog ───────────────── */
+/* ── row click: add park to history, return to spot dialog ─────────────── */
 
 static void row_click_cb(lv_event_t *e) {
     lv_obj_t   *btn  = lv_event_get_target(e);
     const char *park = (const char *)lv_obj_get_user_data(btn);
     if (!park) return;
 
-    pota_parks_add(park);   /* push to top of recent list */
-
-    /* Close nearby — this triggers destruct_cb which restores editing=false */
+    pota_parks_add(park);
     dialog_destruct();
-
-    /* Re-open spot dialog (it was hidden, not destructed) */
     dialog_pota_spot_return();
 }
 
-/* ── scroll list to keep focused child visible ──────────────────────────── */
+/* ── scroll focused row into view ──────────────────────────────────────── */
 
 static void row_focus_cb(lv_event_t *e) {
-    lv_obj_t *btn = lv_event_get_target(e);
-    lv_obj_scroll_to_view(btn, LV_ANIM_ON);
+    lv_obj_scroll_to_view(lv_event_get_target(e), LV_ANIM_ON);
 }
 
 /* ── construct ─────────────────────────────────────────────────────────── */
@@ -97,7 +98,6 @@ static void construct_cb(lv_obj_t *parent) {
         return;
     }
 
-    results_n = 0;
     if (results) { free(results); results = NULL; }
     results = malloc(MAX_ROWS * sizeof(pota_db_entry_t));
     if (!results) {
@@ -124,7 +124,7 @@ static void construct_cb(lv_obj_t *parent) {
     lv_obj_align(hint, LV_ALIGN_TOP_RIGHT, -8, 6);
 
     /* ── scrollable list ──────────────────────────────────────────────── */
-    list = lv_list_create(parent);
+    lv_obj_t *list = lv_list_create(parent);
     lv_obj_set_size(list, lv_obj_get_width(parent) - 16,
                     lv_obj_get_height(parent) - 40);
     lv_obj_align(list, LV_ALIGN_TOP_LEFT, 8, 34);
@@ -154,9 +154,8 @@ static void construct_cb(lv_obj_t *parent) {
         if (i == 0) first_btn = btn;
     }
 
-    /* Editing mode: enc_diff → LV_KEY_UP/DOWN so knob scrolls the list */
-    lv_group_set_editing(keyboard_group, true);
-
+    /* Stay in navigate mode (editing=false) — enc_diff moves focus between
+     * buttons, and press fires LV_EVENT_CLICKED on non-editable buttons. */
     if (first_btn)
         lv_group_focus_obj(first_btn);
 }
@@ -164,8 +163,6 @@ static void construct_cb(lv_obj_t *parent) {
 /* ── destruct ──────────────────────────────────────────────────────────── */
 
 static void destruct_cb(void) {
-    lv_group_set_editing(keyboard_group, false);
-    list      = NULL;
     results_n = 0;
     if (results) { free(results); results = NULL; }
 }
