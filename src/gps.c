@@ -13,6 +13,7 @@
 #include "dialog_gps.h"
 #include "usb_devices.h"
 #include "pubsub_ids.h"
+#include <math.h>
 
 #include <errno.h>
 #include <stdlib.h>

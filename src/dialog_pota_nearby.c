@@ -23,6 +23,7 @@
 #include "dialog.h"
 #include "pota_db.h"
 #include "pota_spot.h"
+#include "wifi.h"
 #include "gps.h"
 #include "styles.h"
 #include "events.h"
@@ -31,6 +32,7 @@
 #include "lvgl/lvgl.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <math.h>
 
 /* ── tunables ──────────────────────────────────────────────────────────── */
@@ -128,7 +130,6 @@ static void construct_cb(lv_obj_t *parent) {
 
     /* ── title label ─────────────────────────────────────────────────── */
     lv_obj_t *title = lv_label_create(parent);
-    lv_obj_add_style(title, &style_label_small, 0);
     lv_label_set_text_fmt(title, "Nearby Parks  (%.4f, %.4f)", lat, lon);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 8, 6);
 
@@ -137,7 +138,6 @@ static void construct_cb(lv_obj_t *parent) {
     lv_obj_set_size(list, lv_obj_get_width(parent) - 16,
                     lv_obj_get_height(parent) - 40);
     lv_obj_align(list, LV_ALIGN_TOP_LEFT, 8, 34);
-    lv_obj_add_style(list, &style_dialog_msg, 0);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
 
     for (int i = 0; i < results_n; i++) {
@@ -153,7 +153,6 @@ static void construct_cb(lv_obj_t *parent) {
                      results[i].ref, results[i].name);
 
         lv_obj_t *btn = lv_list_add_btn(list, NULL, label);
-        lv_obj_add_style(btn, &style_dialog_msg, 0);
         lv_obj_set_user_data(btn, (void *)results[i].ref);
         lv_obj_add_event_cb(btn, row_click_cb, LV_EVENT_CLICKED, NULL);
     }
