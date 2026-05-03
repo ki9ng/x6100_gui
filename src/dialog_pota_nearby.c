@@ -27,11 +27,10 @@
 
 /* ── tunables ──────────────────────────────────────────────────────────── */
 
-#define MAX_ROWS        200
-/* Dialog area: 796 wide, 348 tall (from dialog_style). Subtract padding. */
-#define LIST_W          776
-#define LIST_H          290
-#define TITLE_H         34
+#define MAX_ROWS    200
+#define LIST_W      776     /* dialog is 796px wide, 10px padding each side */
+#define LIST_H      300
+#define TITLE_H     32
 
 /* ── forward declarations ──────────────────────────────────────────────── */
 
@@ -65,14 +64,45 @@ dialog_t *dialog_pota_nearby = &dialog;
 static pota_db_entry_t  *results   = NULL;
 static int               results_n = 0;
 
-/* ── row click: add park to history, return to spot dialog ─────────────── */
+/* ── async early-exit: fires after construct_cb call stack unwinds ───────
+ *
+ * When construct_cb can't build the list (no GPS, no DB, no parks),
+ * dialog_construct has already: saved prev_page, unloaded buttons,
+ * loaded page_nearby, called main_screen_keys_enable(false) — but has NOT
+ * yet set nearby->run=true or current_dialog=nearby.
+ *
+ * We cannot call dialog_destruct() or dialog_pota_spot_return() from inside
+ * construct_cb because we're still on the call stack of btn_nearby_cb which
+ * lives on spot's dialog.obj — deleting it there causes a crash.
+ *
+ * Instead we schedule an async call. By the time it fires, dialog_construct
+ * has finished: nearby->run=true, current_dialog=nearby. We can safely
+ * dialog_destruct() nearby (which restores prev_page=&page_main and calls
+ * main_screen_keys_enable(true)), then call dialog_pota_spot_return().
+ * ────────────────────────────────────────────────────────────────────── */
+
+static void async_abort_cb(void *arg) {
+    (void)arg;
+    /* nearby->run is now true, current_dialog=nearby — safe to destruct */
+    dialog_destruct();
+    dialog_pota_spot_return();
+}
+
+static void early_exit(const char *msg) {
+    msg_schedule_text_fmt("%s", msg);
+    if (results) { free(results); results = NULL; }
+    results_n = 0;
+    lv_async_call(async_abort_cb, NULL);
+}
+
+/* ── row click ──────────────────────────────────────────────────────────── */
 
 static void row_click_cb(lv_event_t *e) {
     lv_obj_t   *btn  = lv_event_get_target(e);
     const char *park = (const char *)lv_obj_get_user_data(btn);
     if (!park) return;
 
-    /* Copy ref before freeing results in destruct_cb */
+    /* Copy before destruct_cb frees results[] */
     char park_copy[16];
     strncpy(park_copy, park, sizeof(park_copy) - 1);
     park_copy[sizeof(park_copy) - 1] = '\0';
@@ -82,13 +112,11 @@ static void row_click_cb(lv_event_t *e) {
     dialog_pota_spot_return();
 }
 
-/* ── scroll focused row into view ──────────────────────────────────────── */
-
 static void row_focus_cb(lv_event_t *e) {
     lv_obj_scroll_to_view(lv_event_get_target(e), LV_ANIM_ON);
 }
 
-/* ── cancel ────────────────────────────────────────────────────────────── */
+/* ── cancel ─────────────────────────────────────────────────────────────── */
 
 static void btn_cancel_cb(struct button_item_t *btn) {
     (void)btn;
@@ -96,50 +124,44 @@ static void btn_cancel_cb(struct button_item_t *btn) {
     dialog_pota_spot_return();
 }
 
-/* ── construct ─────────────────────────────────────────────────────────── */
+/* ── construct ──────────────────────────────────────────────────────────── */
 
 static void construct_cb(lv_obj_t *parent) {
     double lat, lon;
 
     if (!gps_get_fix(&lat, &lon)) {
-        msg_schedule_text_fmt("No GPS fix");
-        dialog_pota_spot_return();
+        early_exit("No GPS fix");
         return;
     }
 
     if (!pota_db_load() || !pota_db_ready()) {
-        msg_schedule_text_fmt("No park database");
-        dialog_pota_spot_return();
+        early_exit("No park database");
         return;
     }
 
     if (results) { free(results); results = NULL; }
     results = malloc(MAX_ROWS * sizeof(pota_db_entry_t));
     if (!results) {
-        msg_schedule_text_fmt("Out of memory");
-        dialog_pota_spot_return();
+        early_exit("Out of memory");
         return;
     }
     results_n = pota_db_nearest(lat, lon, results, MAX_ROWS);
 
     if (results_n == 0) {
-        msg_schedule_text_fmt("No parks found");
-        dialog_pota_spot_return();
+        early_exit("No parks found nearby");
         return;
     }
 
     dialog.obj = dialog_init(parent);
 
-    /* ── title ────────────────────────────────────────────────────────── */
     lv_obj_t *title = lv_label_create(dialog.obj);
-    lv_label_set_text(title, "Nearby Parks — MFK: scroll  \xE2\x80\xA2  Press: select");
+    lv_label_set_text(title, "Nearby Parks  —  MFK: scroll   Press: select");
     lv_obj_set_style_text_color(title, lv_color_hex(0xC0C0C0), 0);
     lv_obj_set_style_text_font(title, &sony_22, 0);
     lv_obj_set_width(title, LIST_W);
     lv_label_set_long_mode(title, LV_LABEL_LONG_CLIP);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 10, 6);
 
-    /* ── scrollable list ──────────────────────────────────────────────── */
     lv_obj_t *list = lv_list_create(dialog.obj);
     lv_obj_set_size(list, LIST_W, LIST_H);
     lv_obj_align(list, LV_ALIGN_TOP_LEFT, 10, TITLE_H);
@@ -151,7 +173,6 @@ static void construct_cb(lv_obj_t *parent) {
     lv_obj_t *first_btn = NULL;
 
     for (int i = 0; i < results_n; i++) {
-        /* Build label: "US-1234    1.2 km  Park Name Here" clipped to window */
         char label[80];
         if (results[i].dist_km < 10.0f)
             snprintf(label, sizeof(label), "%-10s  %4.1f km  %s",
@@ -165,7 +186,6 @@ static void construct_cb(lv_obj_t *parent) {
 
         lv_obj_t *btn = lv_list_add_btn(list, NULL, label);
 
-        /* Clip label instead of scrolling */
         lv_obj_t *lbl = lv_obj_get_child(btn, -1);
         if (lbl) lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
 
@@ -191,7 +211,7 @@ static void construct_cb(lv_obj_t *parent) {
         lv_group_focus_obj(first_btn);
 }
 
-/* ── destruct ──────────────────────────────────────────────────────────── */
+/* ── destruct ───────────────────────────────────────────────────────────── */
 
 static void destruct_cb(void) {
     results_n = 0;
