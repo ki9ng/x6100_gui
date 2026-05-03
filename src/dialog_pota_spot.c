@@ -101,6 +101,8 @@ static void list_btn_click_cb(lv_event_t *e) {
 }
 
 static void rebuild_list(void) {
+    LV_LOG_USER("rebuild_list: list=%p, parks_n=%d", list, pota_parks_count());
+    if (!list) return;
     lv_obj_clean(list);
 
     int n = pota_parks_count();
@@ -167,15 +169,17 @@ static void btn_cancel_cb(struct button_item_t *btn) {
 
 void dialog_pota_spot_return(void) {
     in_nearby = false;
-    /* Rebuild the park list (pota_parks_add was called before we got here) */
-    rebuild_list();
-    /* Unhide the spot dialog */
-    lv_obj_clear_flag(dialog.obj, LV_OBJ_FLAG_HIDDEN);
-    /* nearby's dialog_destruct set current_dialog=NULL and called
-     * main_screen_keys_enable(true). Re-register spot as current_dialog
-     * (spot->run is still true so dialog_construct skips all setup and
-     * only sets current_dialog) and cancel the keys re-enable. */
-    dialog_construct(dialog_pota_spot, NULL);
+    /* nearby's dialog_destruct already: freed its obj, restored &page_main
+     * as cur_page, set current_dialog=NULL, called main_screen_keys_enable(true).
+     *
+     * The spot dialog was only hidden — delete its obj manually, reset run,
+     * then do a clean reconstruct so LVGL lays everything out fresh. */
+    if (dialog.obj) {
+        lv_obj_del(dialog.obj);
+        dialog.obj = NULL;
+    }
+    dialog.run = false;
+    dialog_construct(dialog_pota_spot, lv_scr_act());
 }
 
 /* ─── textarea callbacks ────────────────────────────────────────────────── */
