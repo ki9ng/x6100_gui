@@ -20,3 +20,10 @@ typedef enum {
 void gps_init();
 
 gps_status_t gps_status();
+
+#include <stdbool.h>
+/**
+ * Get current GPS fix. Returns true and fills lat/lon if a 2D/3D fix is
+ * available. Returns false (no-fix, waiting, or no GPS hardware) otherwise.
+ */
+bool gps_get_fix(double *lat, double *lon);

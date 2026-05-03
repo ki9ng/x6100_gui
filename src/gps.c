@@ -95,3 +95,16 @@ void gps_init() {
 gps_status_t gps_status() {
     return status;
 }
+
+bool gps_get_fix(double *lat, double *lon) {
+    pthread_mutex_lock(&lock);
+    bool have_fix = (gpsdata.fix.mode >= MODE_2D) &&
+                    isfinite(gpsdata.fix.latitude) &&
+                    isfinite(gpsdata.fix.longitude);
+    if (have_fix) {
+        *lat = gpsdata.fix.latitude;
+        *lon = gpsdata.fix.longitude;
+    }
+    pthread_mutex_unlock(&lock);
+    return have_fix;
+}

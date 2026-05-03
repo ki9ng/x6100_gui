@@ -296,6 +296,7 @@ static button_item_t btn_settings = make_app_btn("Settings", ACTION_APP_SETTINGS
 
 static button_item_t  btn_wifi      = make_app_btn("WiFi",      ACTION_APP_WIFI);
 static button_item_t  btn_pota_spot = make_app_btn("POTA\nSpot", ACTION_APP_POTA_SPOT);
+static button_item_t  btn_pota_nearby = make_app_btn("Nearby\nParks", ACTION_APP_POTA_NEARBY);
 
 /* RTTY */
 static button_item_t btn_rtty_p1 = {
@@ -422,7 +423,7 @@ static buttons_page_t page_app_2 = {
     {&btn_app_p2, &btn_rec, &btn_qth, &btn_callsign, &btn_settings}
 };
 static buttons_page_t page_app_3 = {
-    {&btn_app_p3, &btn_wifi, &btn_pota_spot, NULL, NULL}
+    {&btn_app_p3, &btn_wifi, &btn_pota_spot, &btn_pota_nearby, NULL}
 };
 
 /* RTTY */

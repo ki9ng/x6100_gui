@@ -39,3 +39,9 @@ void pota_spot_cleanup(void);
  */
 bool pota_spot_wifi(const char *park, int32_t freq_hz,
                     const char *mode, const char *comment);
+
+/**
+ * Return the POTA mode string for the current radio mode.
+ * "SSB" / "CW" / "DATA" / "AM" / "FM"
+ */
+const char *pota_spot_mode_str(void);

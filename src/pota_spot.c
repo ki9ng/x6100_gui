@@ -136,3 +136,17 @@ bool pota_spot_wifi(const char *park, int32_t freq_hz,
 
     return true;
 }
+
+const char *pota_spot_mode_str(void) {
+    switch ((x6100_mode_t)subject_get_int(cfg_cur.mode)) {
+        case x6100_mode_lsb:
+        case x6100_mode_usb:      return "SSB";
+        case x6100_mode_lsb_dig:
+        case x6100_mode_usb_dig:  return "DATA";
+        case x6100_mode_cw:
+        case x6100_mode_cwr:      return "CW";
+        case x6100_mode_am:       return "AM";
+        case x6100_mode_nfm:      return "FM";
+        default:                  return "SSB";
+    }
+}

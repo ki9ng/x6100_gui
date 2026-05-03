@@ -74,23 +74,11 @@ dialog_t *dialog_pota_spot = &dialog;
 
 /* ─── helpers ───────────────────────────────────────────────────────────── */
 
-static const char *mode_str(void) {
-    switch ((x6100_mode_t)subject_get_int(cfg_cur.mode)) {
-        case x6100_mode_lsb:
-        case x6100_mode_usb:      return "SSB";
-        case x6100_mode_lsb_dig:
-        case x6100_mode_usb_dig:  return "DATA";
-        case x6100_mode_cw:
-        case x6100_mode_cwr:      return "CW";
-        case x6100_mode_am:       return "AM";
-        case x6100_mode_nfm:      return "FM";
-        default:                  return "SSB";
-    }
-}
+
 
 static void do_spot(const char *park) {
     int32_t     freq_hz = subject_get_int(cfg_cur.fg_freq);
-    const char *mode    = mode_str();
+    const char *mode    = pota_spot_mode_str();
 
     msg_schedule_text_fmt("Spotting %s...", park);
 
