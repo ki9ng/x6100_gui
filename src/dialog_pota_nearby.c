@@ -61,8 +61,24 @@ dialog_t *dialog_pota_nearby = &dialog;
 
 /* ── state ─────────────────────────────────────────────────────────────── */
 
-static pota_db_entry_t  *results   = NULL;
-static int               results_n = 0;
+static pota_db_entry_t  *results        = NULL;
+static int               results_n      = 0;
+static char              selected_park[16];
+
+/* ── async row-select: defers destruct out of the LVGL event callback ──
+ *
+ * row_click_cb runs inside lv_event_send(). Calling dialog_destruct() from
+ * there deletes the very button that fired the event — a use-after-free.
+ * Instead we copy the park ref into selected_park and schedule an async
+ * call; by the time it fires LVGL has fully exited the event dispatch.
+ * ────────────────────────────────────────────────────────────────────── */
+
+static void async_select_cb(void *arg) {
+    (void)arg;
+    pota_parks_add(selected_park);
+    dialog_destruct();
+    dialog_pota_spot_return();
+}
 
 /* ── async early-exit: fires after construct_cb call stack unwinds ───────
  *
@@ -102,14 +118,13 @@ static void row_click_cb(lv_event_t *e) {
     const char *park = (const char *)lv_obj_get_user_data(btn);
     if (!park) return;
 
-    /* Copy before destruct_cb frees results[] */
-    char park_copy[16];
-    strncpy(park_copy, park, sizeof(park_copy) - 1);
-    park_copy[sizeof(park_copy) - 1] = '\0';
+    /* Copy park ref before async fires (results[] still valid here) */
+    strncpy(selected_park, park, sizeof(selected_park) - 1);
+    selected_park[sizeof(selected_park) - 1] = '\0';
 
-    pota_parks_add(park_copy);
-    dialog_destruct();
-    dialog_pota_spot_return();
+    /* Defer destruct: calling it here (inside lv_event_send) would
+     * delete the button that fired this event — use-after-free crash. */
+    lv_async_call(async_select_cb, NULL);
 }
 
 static void row_focus_cb(lv_event_t *e) {
@@ -129,15 +144,21 @@ static void btn_cancel_cb(struct button_item_t *btn) {
 static void construct_cb(lv_obj_t *parent) {
     double lat, lon;
 
+    LV_LOG_USER("nearby construct_cb: enter");
+
     if (!gps_get_fix(&lat, &lon)) {
         early_exit("No GPS fix");
         return;
     }
 
+    LV_LOG_USER("nearby construct_cb: gps ok lat=%.4f lon=%.4f", lat, lon);
+
     if (!pota_db_load() || !pota_db_ready()) {
         early_exit("No park database");
         return;
     }
+
+    LV_LOG_USER("nearby construct_cb: db ready");
 
     if (results) { free(results); results = NULL; }
     results = malloc(MAX_ROWS * sizeof(pota_db_entry_t));
@@ -146,6 +167,7 @@ static void construct_cb(lv_obj_t *parent) {
         return;
     }
     results_n = pota_db_nearest(lat, lon, results, MAX_ROWS);
+    LV_LOG_USER("nearby construct_cb: pota_db_nearest returned %d parks", results_n);
 
     if (results_n == 0) {
         early_exit("No parks found nearby");
