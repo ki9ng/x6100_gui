@@ -15,6 +15,7 @@
  */
 
 #include "dialog_pota_spot.h"
+#include "dialog_pota_nearby.h"
 
 #include "buttons.h"
 #include "cfg/cfg.h"
@@ -40,6 +41,7 @@ static void destruct_cb(void);
 static void key_cb(lv_event_t *e);
 
 static void btn_new_park_cb(struct button_item_t *btn);
+static void btn_nearby_cb(struct button_item_t *btn);
 static void btn_cancel_cb(struct button_item_t *btn);
 
 static bool textarea_ok_cb(void);
@@ -54,10 +56,11 @@ static bool      in_textarea = false;
 
 /* ─── buttons ───────────────────────────────────────────────────────────── */
 
-static button_item_t btn_new  = { .type = BTN_TEXT, .label = "New Park", .press = btn_new_park_cb };
+static button_item_t btn_new    = { .type = BTN_TEXT, .label = "New Park",    .press = btn_new_park_cb };
+static button_item_t btn_nearby = { .type = BTN_TEXT, .label = "Nearby Parks", .press = btn_nearby_cb    };
 static button_item_t btn_cncl = { .type = BTN_TEXT, .label = "Cancel",   .press = btn_cancel_cb  };
 
-static buttons_page_t page_main = {{ &btn_new, NULL, NULL, NULL, &btn_cncl }};
+static buttons_page_t page_main = {{ &btn_new, &btn_nearby, NULL, NULL, &btn_cncl }};
 
 /* ─── dialog descriptor ─────────────────────────────────────────────────── */
 
@@ -125,6 +128,12 @@ static void btn_new_park_cb(struct button_item_t *btn) {
     lv_textarea_set_max_length(ta, 10);
     lv_textarea_set_placeholder_text(ta, "US-0765");
     lv_obj_add_event_cb(ta, key_cb, LV_EVENT_KEY, NULL);
+}
+
+static void btn_nearby_cb(struct button_item_t *btn) {
+    (void)btn;
+    dialog_destruct();
+    dialog_construct(dialog_pota_nearby, lv_scr_act());
 }
 
 static void btn_cancel_cb(struct button_item_t *btn) {
