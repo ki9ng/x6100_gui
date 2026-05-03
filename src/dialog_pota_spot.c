@@ -167,11 +167,15 @@ static void btn_cancel_cb(struct button_item_t *btn) {
 
 void dialog_pota_spot_return(void) {
     in_nearby = false;
-    /* The spot dialog was only hidden — nearby's dialog_destruct already
-     * restored cur_page to &page_main. Just unhide, refresh the list, and
-     * we're back. No destruct/reconstruct needed. */
+    /* Rebuild the park list (pota_parks_add was called before we got here) */
     rebuild_list();
+    /* Unhide the spot dialog */
     lv_obj_clear_flag(dialog.obj, LV_OBJ_FLAG_HIDDEN);
+    /* nearby's dialog_destruct set current_dialog=NULL and called
+     * main_screen_keys_enable(true). Re-register spot as current_dialog
+     * (spot->run is still true so dialog_construct skips all setup and
+     * only sets current_dialog) and cancel the keys re-enable. */
+    dialog_construct(dialog_pota_spot, NULL);
 }
 
 /* ─── textarea callbacks ────────────────────────────────────────────────── */
