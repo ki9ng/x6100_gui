@@ -42,13 +42,16 @@ static bool textarea_ok_cb(void);
 static bool textarea_cancel_cb(void);
 
 static void do_spot(const char *park);
-static void rebuild_list(void);
+static void populate_list(void);
 
 /* ─── state ─────────────────────────────────────────────────────────────── */
 
-static lv_obj_t *list        = NULL;
-static bool      in_textarea = false;
-static bool      in_nearby   = false;
+static lv_obj_t        *list            = NULL;
+static bool             in_textarea     = false;
+static bool             in_nearby       = false;
+/* Page that was active before spot was ever opened — used to restore on cancel
+ * even after a nearby round-trip resets dialog->prev_page. */
+static buttons_page_t  *app_prev_page   = NULL;
 
 /* ─── buttons ───────────────────────────────────────────────────────────── */
 
@@ -67,7 +70,7 @@ static dialog_t dialog = {
     .audio_cb     = NULL,
     .rotary_cb    = NULL,
     .key_cb       = key_cb,
-    .btn_page     = &page_main,   /* dialog_construct/destruct handles buttons */
+    .btn_page     = &page_main,
 };
 
 dialog_t *dialog_pota_spot = &dialog;
@@ -100,9 +103,7 @@ static void list_btn_click_cb(lv_event_t *e) {
     if (park) do_spot(park);
 }
 
-static void rebuild_list(void) {
-    LV_LOG_USER("rebuild_list: list=%p, parks_n=%d", list, pota_parks_count());
-    if (!list) return;
+static void populate_list(void) {
     lv_obj_clean(list);
 
     int n = pota_parks_count();
@@ -153,15 +154,14 @@ static void btn_new_park_cb(struct button_item_t *btn) {
 static void btn_nearby_cb(struct button_item_t *btn) {
     (void)btn;
     in_nearby = true;
-    /* Hide but do NOT destruct — we are inside a button callback on dialog.obj.
-     * dialog_construct(nearby) will save cur_page=&page_main as nearby->prev_page
-     * and restore it when nearby closes, so our buttons come back automatically. */
     lv_obj_add_flag(dialog.obj, LV_OBJ_FLAG_HIDDEN);
     dialog_construct(dialog_pota_nearby, lv_scr_act());
 }
 
 static void btn_cancel_cb(struct button_item_t *btn) {
     (void)btn;
+    /* Restore the original app page, not whatever nearby left as prev_page */
+    dialog.prev_page = app_prev_page;
     dialog_destruct();
 }
 
@@ -169,16 +169,39 @@ static void btn_cancel_cb(struct button_item_t *btn) {
 
 void dialog_pota_spot_return(void) {
     in_nearby = false;
-    /* nearby's dialog_destruct already: freed its obj, restored &page_main
-     * as cur_page, set current_dialog=NULL, called main_screen_keys_enable(true).
+
+    /* At this point:
+     *   - nearby has been dialog_destruct()ed:
+     *       current_dialog = NULL
+     *       cur_page restored to &page_main  (was nearby->prev_page)
+     *       main_screen_keys_enable(true) scheduled
+     *   - spot dialog.obj still exists (was hidden, not deleted)
+     *   - dialog.run is still true
+     *   - app_prev_page still holds the original app page
      *
-     * The spot dialog was only hidden — delete its obj manually, reset run,
-     * then do a clean reconstruct so LVGL lays everything out fresh. */
+     * We need to bring spot back as if it was freshly constructed:
+     *   1. Delete the stale hidden obj
+     *   2. Reset run=false so dialog_construct does full setup
+     *   3. Patch prev_page to app_prev_page BEFORE dialog_construct saves
+     *      buttons_get_cur_page() — we do this by temporarily making
+     *      buttons_get_cur_page() return app_prev_page by loading it first,
+     *      but that's complex. Simpler: construct, then fix prev_page after.
+     */
+
+    /* Tear down the hidden spot obj cleanly */
     if (dialog.obj) {
         lv_obj_del(dialog.obj);
         dialog.obj = NULL;
     }
     dialog.run = false;
+
+    /* dialog_construct will call buttons_get_cur_page() to save prev_page.
+     * cur_page is currently &page_main (restored by nearby's destruct).
+     * That would make prev_page=&page_main which is wrong.
+     * Load app_prev_page first so dialog_construct saves the right page. */
+    buttons_unload_page();
+    buttons_load_page(app_prev_page);
+
     dialog_construct(dialog_pota_spot, lv_scr_act());
 }
 
@@ -216,17 +239,17 @@ static void construct_cb(lv_obj_t *parent) {
     in_textarea = false;
     in_nearby   = false;
 
-    int n = pota_parks_count();
+    /* Capture the original app page once — preserved across nearby round-trips */
+    if (app_prev_page == NULL) {
+        app_prev_page = dialog.prev_page;
+    }
 
     lv_obj_t *title = lv_label_create(dialog.obj);
-    lv_label_set_text(title, n > 0
+    lv_label_set_text(title, pota_parks_count() > 0
         ? "Select Park or tap New Park"
         : "No recent parks — tap New Park");
     lv_obj_set_style_text_color(title, lv_color_hex(0xC0C0C0), 0);
-    lv_obj_set_style_pad_all(title, 8, 0);
-    lv_obj_set_width(title, 400);
-    lv_label_set_long_mode(title, LV_LABEL_LONG_WRAP);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 4);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 8);
 
     list = lv_list_create(dialog.obj);
     lv_obj_set_size(list, 380, 200);
@@ -235,13 +258,17 @@ static void construct_cb(lv_obj_t *parent) {
     lv_obj_set_style_border_width(list, 0, 0);
     lv_obj_set_style_pad_all(list, 4, 0);
 
-    rebuild_list();
+    populate_list();
 }
 
 static void destruct_cb(void) {
     if (in_textarea) {
         textarea_window_close();
         in_textarea = false;
+    }
+    /* Clear app_prev_page only on a true close, not a nearby round-trip */
+    if (!in_nearby) {
+        app_prev_page = NULL;
     }
     list = NULL;
 }
@@ -255,6 +282,7 @@ static void key_cb(lv_event_t *e) {
                 textarea_window_close();
                 in_textarea = false;
             }
+            dialog.prev_page = app_prev_page;
             dialog_destruct();
             break;
 

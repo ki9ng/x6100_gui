@@ -118,8 +118,7 @@ static void construct_cb(lv_obj_t *parent) {
 
     /* ── scrollable list ──────────────────────────────────────────────── */
     lv_obj_t *list = lv_list_create(dialog.obj);
-    lv_obj_set_size(list, lv_obj_get_width(dialog.obj) - 16,
-                    lv_obj_get_height(dialog.obj) - 40);
+    lv_obj_set_size(list, 460, 220);
     lv_obj_align(list, LV_ALIGN_TOP_LEFT, 8, 34);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
 
