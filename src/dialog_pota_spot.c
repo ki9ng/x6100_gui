@@ -8,12 +8,10 @@
  *  UI:
  *    Main screen — park history list (tap any park → spots immediately)
  *                  [New Park] [Nearby] [Cancel] buttons
- *    New park    — textarea_window (same pattern as dialog_callsign)
- *                  on OK → spots and closes
+ *    New park    — textarea_window overlay, on OK spots and closes.
  *    Nearby      — hides this dialog, opens dialog_pota_nearby on top.
- *                  When nearby closes it calls dialog_pota_spot_return()
- *                  which destructs this dialog and re-constructs it fresh
- *                  (so the park added by nearby appears at top of list).
+ *                  Nearby calls dialog_pota_spot_return() on close,
+ *                  which destructs+reconstructs spot fresh.
  *
  *  KI9NG — ki9ng/x6100_gui feature/pota-spot
  */
@@ -55,9 +53,10 @@ static void do_spot(const char *park);
 
 /* ─── state ─────────────────────────────────────────────────────────────── */
 
-static lv_obj_t *list        = NULL;
-static bool      in_textarea = false;
-static bool      in_nearby   = false;   /* true while nearby dialog is on top */
+static lv_obj_t        *list            = NULL;
+static bool             in_textarea     = false;
+static bool             in_nearby       = false;
+static buttons_page_t  *origin_page     = NULL; /* page active before spot opened */
 
 /* ─── buttons ───────────────────────────────────────────────────────────── */
 
@@ -114,11 +113,7 @@ static void list_btn_click_cb(lv_event_t *e) {
 static void btn_new_park_cb(struct button_item_t *btn) {
     (void)btn;
     in_textarea = true;
-
-    /* Hide the dialog — textarea_window creates its own overlay on top.
-     * Do NOT lv_obj_del here; we are inside a button callback on dialog.obj. */
     lv_obj_add_flag(dialog.obj, LV_OBJ_FLAG_HIDDEN);
-
     textarea_window_open(textarea_ok_cb, textarea_cancel_cb);
 
     lv_obj_t *ta = textarea_window_text();
@@ -135,26 +130,26 @@ static void btn_new_park_cb(struct button_item_t *btn) {
 static void btn_nearby_cb(struct button_item_t *btn) {
     (void)btn;
     in_nearby = true;
-
-    /* Hide this dialog rather than destroying it — we are inside a button
-     * callback on dialog.obj, destroying it here causes use-after-free. */
     lv_obj_add_flag(dialog.obj, LV_OBJ_FLAG_HIDDEN);
-
     dialog_construct(dialog_pota_nearby, lv_scr_act());
 }
 
 static void btn_cancel_cb(struct button_item_t *btn) {
     (void)btn;
+    /* Restore the page that was active before we were opened, then destruct. */
+    dialog.prev_page = origin_page;
     dialog_destruct();
 }
 
 /* ─── called by dialog_pota_nearby when it closes ──────────────────────── */
 
 void dialog_pota_spot_return(void) {
-    /* Nearby has closed. Destruct+reconstruct spot so the park list refreshes. */
     in_nearby = false;
+    /* Preserve origin_page across the destruct+reconstruct cycle. */
+    buttons_page_t *saved_origin = origin_page;
     lv_obj_t *parent = lv_scr_act();
     dialog_destruct();
+    origin_page = saved_origin;
     dialog_construct(dialog_pota_spot, parent);
 }
 
@@ -174,7 +169,6 @@ static bool textarea_ok_cb(void) {
         if (*c >= 'a' && *c <= 'z') *c -= 32;
 
     in_textarea = false;
-
     do_spot(park);
     return true;
 }
@@ -189,9 +183,18 @@ static bool textarea_cancel_cb(void) {
 /* ─── construct / destruct / key ────────────────────────────────────────── */
 
 static void construct_cb(lv_obj_t *parent) {
-    dialog.obj = dialog_init(parent);
+    dialog.obj  = dialog_init(parent);
     in_textarea = false;
     in_nearby   = false;
+
+    /* Capture the page that was active before dialog_construct saved/cleared
+     * it — dialog_construct saves prev_page = buttons_get_cur_page() before
+     * calling us, but then unloads it. We re-read dialog.prev_page which was
+     * set by dialog_construct. Only store it when this is a fresh open (not
+     * a return from nearby). */
+    if (origin_page == NULL) {
+        origin_page = dialog.prev_page;
+    }
 
     int n = pota_parks_count();
 
@@ -223,7 +226,6 @@ static void construct_cb(lv_obj_t *parent) {
 
         lv_obj_set_user_data(b, (void *)park);
         lv_obj_add_event_cb(b, list_btn_click_cb, LV_EVENT_CLICKED, NULL);
-
         lv_group_add_obj(keyboard_group, b);
     }
 
@@ -242,6 +244,10 @@ static void destruct_cb(void) {
         textarea_window_close();
         in_textarea = false;
     }
+    /* Clear origin_page only on a true close (not a nearby round-trip). */
+    if (!in_nearby) {
+        origin_page = NULL;
+    }
 }
 
 static void key_cb(lv_event_t *e) {
@@ -252,16 +258,14 @@ static void key_cb(lv_event_t *e) {
             if (in_textarea) {
                 textarea_window_close();
                 in_textarea = false;
-                dialog_destruct();
-            } else {
-                dialog_destruct();
             }
+            dialog.prev_page = origin_page;
+            dialog_destruct();
             break;
 
         case LV_KEY_ENTER:
-            if (in_textarea) {
+            if (in_textarea)
                 textarea_ok_cb();
-            }
             break;
 
         case KEY_VOL_LEFT_EDIT:
