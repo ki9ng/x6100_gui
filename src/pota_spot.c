@@ -39,7 +39,7 @@ void pota_spot_init(void) {
         return;
     }
     curl_initialized = true;
-    LV_LOG_USER("pota_spot_init: curl ready");
+    LV_LOG_WARN("pota_spot_init: curl ready");
 }
 
 void pota_spot_cleanup(void) {
@@ -99,13 +99,17 @@ bool pota_spot_wifi(const char *park, int32_t freq_hz,
     headers = curl_slist_append(headers, "Referer: " POTA_API_ORIGIN "/");
     headers = curl_slist_append(headers, "User-Agent: X6100-firmware/1.0");
 
+    char errbuf[CURL_ERROR_SIZE] = {0};
     curl_easy_setopt(curl, CURLOPT_URL,            POTA_API_URL);
     curl_easy_setopt(curl, CURLOPT_POST,           1L);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS,     body);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER,     headers);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT,        HTTP_TIMEOUT_SEC);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,  discard_response);
+    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER,    errbuf);
+    LV_LOG_WARN("POTA spot: posting to %s body=%s", POTA_API_URL, body);
 
     CURLcode res = curl_easy_perform(curl);
     long http_code = 0;
@@ -115,7 +119,8 @@ bool pota_spot_wifi(const char *park, int32_t freq_hz,
     curl_easy_cleanup(curl);
 
     if (res != CURLE_OK) {
-        LV_LOG_WARN("POTA spot: curl error %d (%s)", (int)res, curl_easy_strerror(res));
+        LV_LOG_WARN("POTA spot: curl error %d (%s) detail=[%s]",
+                    (int)res, curl_easy_strerror(res), errbuf);
         return false;
     }
     if (http_code != 200) {
@@ -123,7 +128,7 @@ bool pota_spot_wifi(const char *park, int32_t freq_hz,
         return false;
     }
 
-    LV_LOG_USER("POTA spot posted: %s %.1f kHz %s as %s",
+    LV_LOG_WARN("POTA spot posted: %s %.1f kHz %s as %s",
                 park, freq_hz / 1000.0, mode, callsign);
 
     /* Persist to park history */
