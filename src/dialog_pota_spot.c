@@ -104,7 +104,7 @@ static void do_spot(const char *park) {
         msg_schedule_text_fmt("POTA API error — check callsign");
     }
 
-    dialog_destruct(&dialog);
+    dialog_destruct();
 }
 
 /* ─── list item click ───────────────────────────────────────────────────── */
@@ -141,7 +141,7 @@ static void btn_new_park_cb(struct button_item_t *btn) {
 
 static void btn_cancel_cb(struct button_item_t *btn) {
     (void)btn;
-    dialog_destruct(&dialog);
+    dialog_destruct();
 }
 
 /* ─── textarea callbacks ────────────────────────────────────────────────── */
@@ -238,7 +238,6 @@ static void destruct_cb(void) {
         textarea_window_close();
         in_textarea = false;
     }
-    dialog.obj = NULL;
 }
 
 static void key_cb(lv_event_t *e) {
@@ -249,9 +248,9 @@ static void key_cb(lv_event_t *e) {
             if (in_textarea) {
                 textarea_window_close();
                 in_textarea = false;
-                dialog_destruct(&dialog);
+                dialog_destruct();
             } else {
-                dialog_destruct(&dialog);
+                dialog_destruct();
             }
             break;
 
