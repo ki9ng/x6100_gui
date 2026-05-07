@@ -27,7 +27,7 @@
 
 /* ── tunables ──────────────────────────────────────────────────────────── */
 
-#define MAX_ROWS    200
+#define MAX_ROWS    20
 #define LIST_W      776     /* dialog is 796px wide, 10px padding each side */
 #define LIST_H      300
 #define TITLE_H     32
@@ -61,68 +61,69 @@ dialog_t *dialog_pota_nearby = &dialog;
 
 /* ── state ─────────────────────────────────────────────────────────────── */
 
-static pota_db_entry_t  *results        = NULL;
-static int               results_n      = 0;
-static char              selected_park[16];
+static pota_db_entry_t  results[MAX_ROWS];   /* static — no malloc/free needed */
+static int              results_n = 0;
 
-/* ── async row-select: defers destruct out of the LVGL event callback ──
- *
- * row_click_cb runs inside lv_event_send(). Calling dialog_destruct() from
- * there deletes the very button that fired the event — a use-after-free.
- * Instead we copy the park ref into selected_park and schedule an async
- * call; by the time it fires LVGL has fully exited the event dispatch.
- * ────────────────────────────────────────────────────────────────────── */
+/* Park refs copied at populate time so async callbacks never touch results[] */
+static char             park_refs[MAX_ROWS][POTA_DB_REF_LEN];
+
+/* Pending selection for async_select_cb */
+static char             selected_park[POTA_DB_REF_LEN];
+
+/* Pending cancel/abort — set true then async fires */
+static bool             pending_cancel = false;
+
+/* ── async callbacks ────────────────────────────────────────────────────── */
+
+/*
+ * All three async callbacks share the same structure:
+ *   1. dialog_destruct() — safe because nearby->run=true by now
+ *   2. dialog_pota_spot_return() — rebuilds spot dialog
+ * The difference is whether we commit a park selection first.
+ */
 
 static void async_select_cb(void *arg) {
     (void)arg;
+    LV_LOG_USER("async_select_cb: selecting park '%s'", selected_park);
     pota_parks_add(selected_park);
     dialog_destruct();
     dialog_pota_spot_return();
 }
 
-/* ── async early-exit: fires after construct_cb call stack unwinds ───────
- *
- * When construct_cb can't build the list (no GPS, no DB, no parks),
- * dialog_construct has already: saved prev_page, unloaded buttons,
- * loaded page_nearby, called main_screen_keys_enable(false) — but has NOT
- * yet set nearby->run=true or current_dialog=nearby.
- *
- * We cannot call dialog_destruct() or dialog_pota_spot_return() from inside
- * construct_cb because we're still on the call stack of btn_nearby_cb which
- * lives on spot's dialog.obj — deleting it there causes a crash.
- *
- * Instead we schedule an async call. By the time it fires, dialog_construct
- * has finished: nearby->run=true, current_dialog=nearby. We can safely
- * dialog_destruct() nearby (which restores prev_page=&page_main and calls
- * main_screen_keys_enable(true)), then call dialog_pota_spot_return().
- * ────────────────────────────────────────────────────────────────────── */
-
-static void async_abort_cb(void *arg) {
+static void async_cancel_cb(void *arg) {
     (void)arg;
-    /* nearby->run is now true, current_dialog=nearby — safe to destruct */
+    LV_LOG_USER("async_cancel_cb: enter");
     dialog_destruct();
     dialog_pota_spot_return();
 }
 
+/* ── early-exit helper ──────────────────────────────────────────────────── */
+/*
+ * Called from construct_cb before dialog_init() — dialog.obj is still NULL,
+ * nearby->run is still false, current_dialog is still spot.
+ * We CANNOT call dialog_destruct() or dialog_pota_spot_return() here.
+ * Schedule async_cancel_cb; by the time it fires dialog_construct() has
+ * finished: nearby->run=true, current_dialog=nearby, safe to destruct.
+ */
 static void early_exit(const char *msg) {
+    LV_LOG_USER("nearby early_exit: %s", msg);
     msg_schedule_text_fmt("%s", msg);
-    if (results) { free(results); results = NULL; }
     results_n = 0;
-    lv_async_call(async_abort_cb, NULL);
+    lv_async_call(async_cancel_cb, NULL);
 }
 
-/* ── row click ──────────────────────────────────────────────────────────── */
+/* ── row events ─────────────────────────────────────────────────────────── */
 
 static void row_click_cb(lv_event_t *e) {
-    lv_obj_t   *btn  = lv_event_get_target(e);
-    const char *park = (const char *)lv_obj_get_user_data(btn);
-    if (!park) return;
+    lv_obj_t *btn = lv_event_get_target(e);
+    int idx = (int)(uintptr_t)lv_obj_get_user_data(btn);
+    if (idx < 0 || idx >= results_n) return;
 
-    /* Copy park ref before async fires (results[] still valid here) */
-    strncpy(selected_park, park, sizeof(selected_park) - 1);
+    /* Copy ref into selected_park before async fires */
+    strncpy(selected_park, park_refs[idx], sizeof(selected_park) - 1);
     selected_park[sizeof(selected_park) - 1] = '\0';
 
-    /* Defer destruct: calling it here (inside lv_event_send) would
+    /* Defer: calling dialog_destruct() here (inside lv_event_send) would
      * delete the button that fired this event — use-after-free crash. */
     lv_async_call(async_select_cb, NULL);
 }
@@ -131,12 +132,17 @@ static void row_focus_cb(lv_event_t *e) {
     lv_obj_scroll_to_view(lv_event_get_target(e), LV_ANIM_ON);
 }
 
-/* ── cancel ─────────────────────────────────────────────────────────────── */
+/* ── cancel / ESC ───────────────────────────────────────────────────────── */
+/*
+ * Both cancel paths defer via async — calling dialog_destruct() synchronously
+ * from a button press handler or key event would delete dialog.obj (parent
+ * of the button) while still inside LVGL's event dispatch — use-after-free.
+ */
 
 static void btn_cancel_cb(struct button_item_t *btn) {
     (void)btn;
-    dialog_destruct();
-    dialog_pota_spot_return();
+    LV_LOG_USER("btn_cancel_cb: scheduling async_cancel");
+    lv_async_call(async_cancel_cb, NULL);
 }
 
 /* ── construct ──────────────────────────────────────────────────────────── */
@@ -150,22 +156,14 @@ static void construct_cb(lv_obj_t *parent) {
         early_exit("No GPS fix");
         return;
     }
-
     LV_LOG_USER("nearby construct_cb: gps ok lat=%.4f lon=%.4f", lat, lon);
 
     if (!pota_db_load() || !pota_db_ready()) {
         early_exit("No park database");
         return;
     }
+    LV_LOG_USER("nearby construct_cb: db ready, %d parks total", pota_db_count());
 
-    LV_LOG_USER("nearby construct_cb: db ready");
-
-    if (results) { free(results); results = NULL; }
-    results = malloc(MAX_ROWS * sizeof(pota_db_entry_t));
-    if (!results) {
-        early_exit("Out of memory");
-        return;
-    }
     results_n = pota_db_nearest(lat, lon, results, MAX_ROWS);
     LV_LOG_USER("nearby construct_cb: pota_db_nearest returned %d parks", results_n);
 
@@ -173,6 +171,14 @@ static void construct_cb(lv_obj_t *parent) {
         early_exit("No parks found nearby");
         return;
     }
+
+    /* Copy park refs into our static array — buttons store index, not pointer */
+    for (int i = 0; i < results_n; i++) {
+        strncpy(park_refs[i], results[i].ref, POTA_DB_REF_LEN - 1);
+        park_refs[i][POTA_DB_REF_LEN - 1] = '\0';
+    }
+
+    /* ── build UI ─────────────────────────────────────────────────────── */
 
     dialog.obj = dialog_init(parent);
 
@@ -198,13 +204,13 @@ static void construct_cb(lv_obj_t *parent) {
         char label[80];
         if (results[i].dist_km < 10.0f)
             snprintf(label, sizeof(label), "%-10s  %4.1f km  %s",
-                     results[i].ref, results[i].dist_km, results[i].name);
+                     park_refs[i], results[i].dist_km, results[i].name);
         else if (results[i].dist_km < 1000.0f)
             snprintf(label, sizeof(label), "%-10s  %4.0f km  %s",
-                     results[i].ref, results[i].dist_km, results[i].name);
+                     park_refs[i], results[i].dist_km, results[i].name);
         else
             snprintf(label, sizeof(label), "%-10s  >999 km  %s",
-                     results[i].ref, results[i].name);
+                     park_refs[i], results[i].name);
 
         lv_obj_t *btn = lv_list_add_btn(list, NULL, label);
 
@@ -220,7 +226,8 @@ static void construct_cb(lv_obj_t *parent) {
         lv_obj_set_style_pad_hor(btn, 8, 0);
         lv_obj_set_width(btn, LIST_W);
 
-        lv_obj_set_user_data(btn, (void *)results[i].ref);
+        /* Store index, not pointer — park_refs[] is static and safe */
+        lv_obj_set_user_data(btn, (void *)(uintptr_t)i);
         lv_obj_add_event_cb(btn, row_click_cb, LV_EVENT_CLICKED, NULL);
         lv_obj_add_event_cb(btn, row_focus_cb, LV_EVENT_FOCUSED, NULL);
 
@@ -231,13 +238,16 @@ static void construct_cb(lv_obj_t *parent) {
 
     if (first_btn)
         lv_group_focus_obj(first_btn);
+
+    LV_LOG_USER("nearby construct_cb: UI built, %d rows", results_n);
 }
 
 /* ── destruct ───────────────────────────────────────────────────────────── */
 
 static void destruct_cb(void) {
+    LV_LOG_USER("nearby destruct_cb: clearing %d results", results_n);
     results_n = 0;
-    if (results) { free(results); results = NULL; }
+    /* results[] is static — no free needed */
 }
 
 /* ── key handler ────────────────────────────────────────────────────────── */
@@ -245,7 +255,7 @@ static void destruct_cb(void) {
 static void key_cb(lv_event_t *e) {
     uint32_t key = *((uint32_t *)lv_event_get_param(e));
     if (key == LV_KEY_ESC) {
-        dialog_destruct();
-        dialog_pota_spot_return();
+        LV_LOG_USER("key_cb: ESC — scheduling async_cancel");
+        lv_async_call(async_cancel_cb, NULL);
     }
 }
