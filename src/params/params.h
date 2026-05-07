@@ -48,7 +48,6 @@ typedef enum {
     ACTION_APP_CALLSIGN,
     ACTION_APP_WIFI,
     ACTION_APP_POTA_SPOT,
-    ACTION_APP_POTA_NEARBY,
 } press_action_t;
 
 typedef enum {

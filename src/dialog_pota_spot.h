@@ -3,8 +3,8 @@
  *
  *  Xiegu X6100 LVGL GUI
  *
- *  POTA self-spot dialog
- *  KI9NG — ki9ng/x6100_gui feature/pota-spot
+ *  POTA self-spot dialog — unified picker for recent + nearby parks.
+ *  KI9NG — ki9ng/x6100_gui feature/pota-nearby-unified
  */
 
 #pragma once
@@ -13,10 +13,3 @@
 #include "buttons.h"
 
 extern dialog_t *dialog_pota_spot;
-
-/**
- * Called by dialog_pota_nearby when it closes after a selection (or ESC).
- * Destructs the hidden spot dialog and re-constructs it fresh so the
- * newly-added park appears at the top of the history list.
- */
-void dialog_pota_spot_return(void);

@@ -43,7 +43,6 @@
 #include "dialog_callsign.h"
 #include "dialog_wifi.h"
 #include "dialog_pota_spot.h"
-#include "dialog_pota_nearby.h"
 #include "backlight.h"
 #include "buttons.h"
 #include "recorder.h"
@@ -172,11 +171,6 @@ void main_screen_start_app(press_action_t app_action) {
         case ACTION_APP_WIFI:
             dialog_construct(dialog_wifi, obj);
             voice_say_text_fmt("Wi-Fi window");
-            break;
-
-        case ACTION_APP_POTA_NEARBY:
-            dialog_construct(dialog_pota_nearby, obj);
-            voice_say_text_fmt("Nearby parks");
             break;
 
         case ACTION_APP_POTA_SPOT:
