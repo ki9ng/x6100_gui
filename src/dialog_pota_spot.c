@@ -3,17 +3,30 @@
  *
  *  Xiegu X6100 LVGL GUI
  *
- *  POTA self-spot dialog — unified picker for recent + nearby parks.
+ *  POTA self-spot dialog — unified picker for recent + nearby parks,
+ *  followed by a method-of-spotting picker (WiFi or JS8Call), and (if JS8)
+ *  an optional band picker with ATU tune.
  *
  *  KI9NG — ki9ng/x6100_gui feature/pota-nearby-unified
  *
- *  Design rationale: see wiki page radio/x6100-pota-nearby-ux-plan.md.
- *  Previously this was a two-dialog setup (spot + nearby) with hide-not-destruct
- *  round-trip that produced a long string of crashes. The unified list keeps
- *  everything in this one dialog: RECENT section from pota_parks history, then
- *  a NEARBY section from pota_db_nearest() when GPS is locked. Section headers
- *  use lv_list_add_text() which is not focusable, so the MFK encoder naturally
- *  skips past them.
+ *  Design rationale: see wiki page radio/x6100-pota-nearby-ux-plan.md and
+ *  radio/js8call-pota-spot.md.
+ *
+ *  Architecture: a single dialog_t that walks through up to four view states.
+ *  Each state-transition tears down all child widgets of the dialog body and
+ *  rebuilds the relevant ones — the outer dialog.obj container is stable for
+ *  the entire lifetime of the dialog. This avoids the hide-and-reuse traps
+ *  that bit the original two-dialog setup.
+ *
+ *    VIEW_LIST     — RECENT + NEARBY park picker (list of clickable rows)
+ *    VIEW_METHOD   — "Spot US-0765 via..." with [WiFi] [JS8Call] [Cancel]
+ *    VIEW_BAND     — JS8 band picker: 80/40/30/20/17/15/12/10m, [ATU tune?] [Send] [Back]
+ *    VIEW_TEXTAREA — virtual keyboard for "New Park" manual entry (existing)
+ *
+ *  The JS8 send path is currently a stub: it asks the radio to QSY (and
+ *  optionally ATU-tune) but the actual JS8 modulation is not yet ported to
+ *  the firmware. When the engine port lands (see projects/x6100-js8-engine),
+ *  swap the stub call in js8_do_spot() for the real generator.
  */
 
 #include "dialog_pota_spot.h"
@@ -30,6 +43,7 @@
 #include "pota_db.h"
 #include "pota_parks.h"
 #include "pota_spot.h"
+#include "radio.h"
 #include "styles.h"
 #include "textarea_window.h"
 #include "wifi.h"
@@ -40,9 +54,38 @@
 /* ─── tunables ──────────────────────────────────────────────────────────── */
 
 #define MAX_NEARBY      5      /* how many nearest parks to show */
-#define LIST_W          776    /* dialog is 796px wide */
-#define LIST_H          280    /* leave room for title above */
+#define LIST_W          776    /* dialog body width */
+#define BODY_H          280    /* available vertical space below the title */
 #define TITLE_H         32
+
+/* ─── JS8 band table ────────────────────────────────────────────────────── */
+
+/* USB dial frequency for JS8 Normal calling, audio offset 1500 Hz.
+ * Source: radio/js8call-pota-spot.md and the JS8Call community defaults. */
+typedef struct {
+    const char *label;       /* "20m" */
+    uint32_t    dial_hz;     /* 14078000 */
+} js8_band_t;
+
+static const js8_band_t js8_bands[] = {
+    { "80m",  3578000 },
+    { "40m",  7078000 },
+    { "30m", 10130000 },
+    { "20m", 14078000 },
+    { "17m", 18104000 },
+    { "15m", 21078000 },
+    { "12m", 24922000 },
+    { "10m", 28078000 },
+};
+#define JS8_BANDS_N ((int)(sizeof(js8_bands) / sizeof(js8_bands[0])))
+
+/* ─── view states ───────────────────────────────────────────────────────── */
+
+typedef enum {
+    VIEW_LIST,
+    VIEW_METHOD,
+    VIEW_BAND,
+} view_state_t;
 
 /* ─── forward declarations ──────────────────────────────────────────────── */
 
@@ -53,19 +96,40 @@ static void key_cb(lv_event_t *e);
 static void btn_new_park_cb(struct button_item_t *btn);
 static void btn_refresh_cb(struct button_item_t *btn);
 static void btn_cancel_cb(struct button_item_t *btn);
+static void btn_back_cb(struct button_item_t *btn);
 
 static bool textarea_ok_cb(void);
 static bool textarea_cancel_cb(void);
 
-static void do_spot(const char *park);
-static void populate_list(void);
+static void show_list(void);
+static void show_method(const char *park);
+static void show_band(void);
+
+static void wifi_do_spot(const char *park);
+static void js8_do_spot(const char *park, uint32_t dial_hz, bool tune_atu);
+
 static void list_btn_click_cb(lv_event_t *e);
+static void method_wifi_btn_cb(lv_event_t *e);
+static void method_js8_btn_cb(lv_event_t *e);
+static void band_btn_cb(lv_event_t *e);
+static void atu_chk_cb(lv_event_t *e);
+static void send_js8_btn_cb(lv_event_t *e);
 
 /* ─── state ─────────────────────────────────────────────────────────────── */
 
-static lv_obj_t *list        = NULL;
-static lv_obj_t *title_lbl   = NULL;
-static bool      in_textarea = false;
+static view_state_t view = VIEW_LIST;
+static lv_obj_t   *body  = NULL;   /* container holding view-specific children */
+static lv_obj_t   *title_lbl = NULL;
+static bool        in_textarea = false;
+
+/* The currently-selected park, valid in VIEW_METHOD and VIEW_BAND. */
+static char selected_park[POTA_DB_REF_LEN] = "";
+
+/* User's JS8 band + ATU choice in VIEW_BAND. -1 = none selected. */
+static int  js8_band_idx = -1;
+static bool js8_tune_atu = false;
+static lv_obj_t *atu_chk = NULL;
+static lv_obj_t *band_btns[JS8_BANDS_N] = {0};
 
 /* Static park-ref storage so list-button user_data remains valid for the
  * lifetime of the dialog. We store at most POTA_PARKS_MAX recent + MAX_NEARBY
@@ -74,13 +138,18 @@ static bool      in_textarea = false;
 static char park_refs[MAX_REFS][POTA_DB_REF_LEN];
 static int  park_refs_n = 0;
 
-/* ─── buttons ───────────────────────────────────────────────────────────── */
+/* ─── footer-button definitions (top-of-screen function row) ────────────── */
+/* The footer buttons depend on which view we're in. The button table is
+ * swapped via buttons_load_page() during view transitions. */
 
 static button_item_t btn_new     = { .type = BTN_TEXT, .label = "New Park",        .press = btn_new_park_cb };
 static button_item_t btn_refresh = { .type = BTN_TEXT, .label = "Refresh\nNearby", .press = btn_refresh_cb  };
 static button_item_t btn_cncl    = { .type = BTN_TEXT, .label = "Cancel",          .press = btn_cancel_cb   };
+static button_item_t btn_back    = { .type = BTN_TEXT, .label = "Back",            .press = btn_back_cb     };
 
-static buttons_page_t page_main = {{ &btn_new, &btn_refresh, NULL, NULL, &btn_cncl }};
+static buttons_page_t page_list   = {{ &btn_new,  &btn_refresh, NULL, NULL, &btn_cncl }};
+static buttons_page_t page_method = {{ &btn_back, NULL,         NULL, NULL, &btn_cncl }};
+static buttons_page_t page_band   = {{ &btn_back, NULL,         NULL, NULL, &btn_cncl }};
 
 /* ─── dialog descriptor ─────────────────────────────────────────────────── */
 
@@ -91,18 +160,18 @@ static dialog_t dialog = {
     .audio_cb     = NULL,
     .rotary_cb    = NULL,
     .key_cb       = key_cb,
-    .btn_page     = &page_main,
+    .btn_page     = &page_list,
 };
 
 dialog_t *dialog_pota_spot = &dialog;
 
-/* ─── spot helper ───────────────────────────────────────────────────────── */
+/* ─── spot helpers ──────────────────────────────────────────────────────── */
 
-static void do_spot(const char *park) {
+static void wifi_do_spot(const char *park) {
     int32_t     freq_hz = subject_get_int(cfg_cur.fg_freq);
     const char *mode    = pota_spot_mode_str();
 
-    msg_schedule_text_fmt("Spotting %s...", park);
+    msg_schedule_text_fmt("Spotting %s via WiFi...", park);
 
     bool ok = pota_spot_wifi(park, freq_hz, mode, NULL);
 
@@ -116,18 +185,48 @@ static void do_spot(const char *park) {
     dialog_destruct();
 }
 
-/* ─── list population ───────────────────────────────────────────────────── */
+/* JS8 spot stub. The actual JS8 encoder + modulator + scheduler is not yet
+ * ported to the firmware (see projects/x6100-js8-engine and the design notes
+ * in radio/js8call-pota-spot.md). For now: QSY to the chosen JS8 dial freq,
+ * optionally fire the ATU tune sequence, and tell the user the engine isn't
+ * live yet. The full path will replace this body. */
+static void js8_do_spot(const char *park, uint32_t dial_hz, bool tune_atu) {
+    msg_schedule_text_fmt("QSY to %u kHz", dial_hz / 1000);
+    radio_set_freq(dial_hz);
+
+    if (tune_atu) {
+        msg_schedule_text_fmt("Running ATU tune...");
+        radio_start_atu();
+    }
+
+    /* TODO: once libx6100js8 lands, replace this stub with:
+     *   1. Build the on-air string:
+     *        "@APRSIS CMD :POTAGW   :KI9NG <park> <dial_hz/1000> <mode>"
+     *   2. JS8 encode + modulate to 48 kHz PCM in std::vector<int16_t>
+     *   3. Hand off to the slot-aligned scheduler (FT8 pattern, one
+     *      PTT cycle per JS8 frame, 5 frames for a typical spot).
+     *   4. Display per-frame TX progress; on completion, msg_schedule_text
+     *      "Spotted %s on JS8 — %u frames sent". */
+    msg_schedule_text_fmt("JS8 engine not yet ported — spot %s skipped", park);
+
+    dialog_destruct();
+}
+
+/* ─── list view ─────────────────────────────────────────────────────────── */
 
 static void list_btn_click_cb(lv_event_t *e) {
     lv_obj_t *btn = lv_event_get_target(e);
     int idx = (int)(intptr_t)lv_obj_get_user_data(btn);
     if (idx < 0 || idx >= park_refs_n) return;
 
-    /* Add nearby selections to recent history before spotting. pota_parks_add
-     * is a no-op if the park is already at the top of recent. */
+    /* Add nearby selections to recent history before showing method picker.
+     * pota_parks_add is a no-op if the park is already at the top of recent. */
     pota_parks_add(park_refs[idx]);
 
-    do_spot(park_refs[idx]);
+    strncpy(selected_park, park_refs[idx], sizeof(selected_park) - 1);
+    selected_park[sizeof(selected_park) - 1] = '\0';
+
+    show_method(selected_park);
 }
 
 static lv_obj_t *add_park_row(lv_obj_t *parent, const char *label_text, int ref_idx) {
@@ -164,10 +263,7 @@ static void add_section_header(lv_obj_t *parent, const char *text) {
     lv_label_set_long_mode(hdr, LV_LABEL_LONG_CLIP);
 }
 
-/* Format a park row label: "REF        4.2 km  Park Name" or
- * "REF        ? km    Park Name" if no GPS fix, or
- * "REF        (unknown)" if not in the DB.
- * Buffer must be at least 80 chars. */
+/* Format a park row label: "REF        4.2 km  Park Name" / "? km" / "(unknown)". */
 static void format_row(char *buf, size_t buflen, const char *ref,
                        bool have_fix, double lat, double lon)
 {
@@ -189,21 +285,31 @@ static void format_row(char *buf, size_t buflen, const char *ref,
         snprintf(buf, buflen, "%-10s  >999 km  %s", ref, e->name);
 }
 
-static void populate_list(void) {
-    if (!list) return;
+static void show_list(void) {
+    if (!body) return;
+    view = VIEW_LIST;
 
-    lv_obj_clean(list);
+    lv_obj_clean(body);
     park_refs_n = 0;
+
+    buttons_load_page(&page_list);
+
+    lv_obj_t *list = lv_list_create(body);
+    lv_obj_set_size(list, LIST_W, BODY_H);
+    lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    lv_obj_set_style_bg_opa(list, LV_OPA_20, 0);
+    lv_obj_set_style_border_width(list, 0, 0);
+    lv_obj_set_style_pad_all(list, 4, 0);
 
     lv_obj_t *first_btn = NULL;
 
-    /* Load DB unconditionally — RECENT rows want names too. The DB is small
-     * (~25k parks, ~900 KB resident) and load is idempotent after first call. */
+    /* Load DB unconditionally — RECENT rows want names too. */
     bool have_db  = pota_db_load() && pota_db_ready();
     double lat = 0.0, lon = 0.0;
     bool have_fix = gps_get_fix(&lat, &lon);
 
-    /* ── RECENT section ───────────────────────────────────────────────── */
+    /* RECENT */
     int recent_n = pota_parks_count();
     if (recent_n > 0) {
         add_section_header(list, "── RECENT ──");
@@ -215,11 +321,10 @@ static void populate_list(void) {
             park_refs[park_refs_n][POTA_DB_REF_LEN - 1] = '\0';
 
             char label[80];
-            if (have_db) {
+            if (have_db)
                 format_row(label, sizeof(label), park, have_fix, lat, lon);
-            } else {
+            else
                 snprintf(label, sizeof(label), "%s", park);
-            }
 
             lv_obj_t *btn = add_park_row(list, label, park_refs_n);
             if (!first_btn) first_btn = btn;
@@ -228,7 +333,7 @@ static void populate_list(void) {
         }
     }
 
-    /* ── NEARBY section ───────────────────────────────────────────────── */
+    /* NEARBY */
     if (have_fix && have_db) {
         static pota_db_entry_t nearby[MAX_NEARBY];
         int nearby_n = pota_db_nearest(lat, lon, nearby, MAX_NEARBY);
@@ -259,7 +364,7 @@ static void populate_list(void) {
         }
     }
 
-    /* ── empty state ──────────────────────────────────────────────────── */
+    /* Empty state */
     if (park_refs_n == 0) {
         lv_obj_t *empty = lv_label_create(list);
         lv_label_set_text(empty, "Tap New Park to enter a reference");
@@ -268,22 +373,217 @@ static void populate_list(void) {
         lv_obj_center(empty);
     }
 
-    /* Focus the first selectable row so MFK works immediately */
-    if (first_btn) {
+    if (first_btn)
         lv_group_focus_obj(first_btn);
-    }
 
-    /* Update title with current state */
     if (title_lbl) {
         if (park_refs_n > 0)
-            lv_label_set_text(title_lbl, "MFK: scroll   Press: spot");
+            lv_label_set_text(title_lbl, "MFK: scroll   Press: pick park");
         else
             lv_label_set_text(title_lbl, "No parks — tap New Park");
     }
 }
 
+/* ─── method view ───────────────────────────────────────────────────────── */
 
-/* ─── button callbacks ──────────────────────────────────────────────────── */
+static lv_obj_t *make_action_btn(lv_obj_t *parent, const char *label,
+                                 lv_event_cb_t cb, int x_off, int y_off,
+                                 int w, int h)
+{
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_set_size(btn, w, h);
+    lv_obj_align(btn, LV_ALIGN_TOP_MID, x_off, y_off);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x1A3A5C), 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x2E6FBF), LV_STATE_FOCUSED);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+    lv_group_add_obj(keyboard_group, btn);
+
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, label);
+    lv_obj_set_style_text_font(lbl, &sony_22, 0);
+    lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+    lv_obj_center(lbl);
+
+    return btn;
+}
+
+static void method_wifi_btn_cb(lv_event_t *e) {
+    (void)e;
+    wifi_do_spot(selected_park);
+}
+
+static void method_js8_btn_cb(lv_event_t *e) {
+    (void)e;
+    show_band();
+}
+
+static void show_method(const char *park) {
+    if (!body) return;
+    view = VIEW_METHOD;
+
+    lv_obj_clean(body);
+    buttons_load_page(&page_method);
+
+    /* Banner */
+    lv_obj_t *banner = lv_label_create(body);
+    lv_label_set_text_fmt(banner, "Spot %s via...", park);
+    lv_obj_set_style_text_font(banner, &sony_22, 0);
+    lv_obj_set_style_text_color(banner, lv_color_white(), 0);
+    lv_obj_align(banner, LV_ALIGN_TOP_MID, 0, 16);
+
+    /* Show WiFi status under the banner so the operator knows whether the
+     * WiFi path is even available before tapping it. */
+    lv_obj_t *wifi_state = lv_label_create(body);
+    bool connected = (wifi_get_status() == WIFI_CONNECTED);
+    if (connected)
+        lv_label_set_text(wifi_state, "WiFi: connected");
+    else
+        lv_label_set_text(wifi_state, "WiFi: not connected");
+    lv_obj_set_style_text_font(wifi_state, &sony_22, 0);
+    lv_obj_set_style_text_color(wifi_state,
+        connected ? lv_color_hex(0x80C080) : lv_color_hex(0xC08080), 0);
+    lv_obj_align(wifi_state, LV_ALIGN_TOP_MID, 0, 56);
+
+    const int btn_w  = 280;
+    const int btn_h  = 64;
+    const int gap    = 24;
+    const int row_y  = 120;
+
+    lv_obj_t *wifi_btn = make_action_btn(body, "Send via WiFi",
+        method_wifi_btn_cb, -(btn_w / 2 + gap / 2), row_y, btn_w, btn_h);
+    lv_obj_t *js8_btn  = make_action_btn(body, "Send via JS8Call",
+        method_js8_btn_cb, +(btn_w / 2 + gap / 2), row_y, btn_w, btn_h);
+
+    /* Dim WiFi button if there's no link, but leave it clickable so the user
+     * gets the same "No WiFi — spot failed" message they would have gotten
+     * from a direct spot attempt. (Some environments show CONNECTED late.) */
+    if (!connected) {
+        lv_obj_set_style_bg_color(wifi_btn, lv_color_hex(0x404040), 0);
+    }
+
+    lv_group_focus_obj(connected ? wifi_btn : js8_btn);
+
+    if (title_lbl)
+        lv_label_set_text(title_lbl, "Pick a method");
+}
+
+/* ─── band view ─────────────────────────────────────────────────────────── */
+
+static void band_btn_cb(lv_event_t *e) {
+    lv_obj_t *btn = lv_event_get_target(e);
+    int idx = (int)(intptr_t)lv_obj_get_user_data(btn);
+    if (idx < 0 || idx >= JS8_BANDS_N) return;
+
+    /* Repaint the previously-selected button back to default and the new
+     * one to the selected color. */
+    for (int i = 0; i < JS8_BANDS_N; i++) {
+        if (!band_btns[i]) continue;
+        lv_obj_set_style_bg_color(band_btns[i],
+            (i == idx) ? lv_color_hex(0xC08020)   /* selected = amber */
+                       : lv_color_hex(0x1A3A5C),  /* default */
+            0);
+    }
+    js8_band_idx = idx;
+
+    if (title_lbl)
+        lv_label_set_text_fmt(title_lbl, "JS8 on %s @ %u kHz",
+            js8_bands[idx].label, js8_bands[idx].dial_hz / 1000);
+}
+
+static void atu_chk_cb(lv_event_t *e) {
+    lv_obj_t *cb = lv_event_get_target(e);
+    js8_tune_atu = lv_obj_has_state(cb, LV_STATE_CHECKED);
+}
+
+static void send_js8_btn_cb(lv_event_t *e) {
+    (void)e;
+    if (js8_band_idx < 0) {
+        msg_schedule_text_fmt("Pick a band first");
+        return;
+    }
+    js8_do_spot(selected_park, js8_bands[js8_band_idx].dial_hz, js8_tune_atu);
+}
+
+static void show_band(void) {
+    if (!body) return;
+    view = VIEW_BAND;
+    js8_band_idx = -1;
+    js8_tune_atu = false;
+    memset(band_btns, 0, sizeof(band_btns));
+
+    lv_obj_clean(body);
+    buttons_load_page(&page_band);
+
+    /* Banner */
+    lv_obj_t *banner = lv_label_create(body);
+    lv_label_set_text_fmt(banner, "JS8 spot %s — pick band", selected_park);
+    lv_obj_set_style_text_font(banner, &sony_22, 0);
+    lv_obj_set_style_text_color(banner, lv_color_white(), 0);
+    lv_obj_align(banner, LV_ALIGN_TOP_MID, 0, 8);
+
+    /* 4×2 grid of band buttons */
+    const int btn_w = 140;
+    const int btn_h = 56;
+    const int x_gap = 12;
+    const int y_gap = 12;
+    const int grid_cols = 4;
+    const int grid_y = 50;
+    const int grid_total_w = grid_cols * btn_w + (grid_cols - 1) * x_gap;
+    const int x0 = -(grid_total_w / 2) + (btn_w / 2);
+
+    lv_obj_t *first_band_btn = NULL;
+    for (int i = 0; i < JS8_BANDS_N; i++) {
+        int col = i % grid_cols;
+        int row = i / grid_cols;
+        int x = x0 + col * (btn_w + x_gap);
+        int y = grid_y + row * (btn_h + y_gap);
+
+        lv_obj_t *btn = lv_btn_create(body);
+        lv_obj_set_size(btn, btn_w, btn_h);
+        lv_obj_align(btn, LV_ALIGN_TOP_MID, x, y);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x1A3A5C), 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x2E6FBF), LV_STATE_FOCUSED);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_user_data(btn, (void *)(intptr_t)i);
+        lv_obj_add_event_cb(btn, band_btn_cb, LV_EVENT_CLICKED, NULL);
+        lv_group_add_obj(keyboard_group, btn);
+
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text_fmt(lbl, "%s\n%u", js8_bands[i].label,
+                              js8_bands[i].dial_hz / 1000);
+        lv_obj_set_style_text_font(lbl, &sony_22, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_center(lbl);
+
+        band_btns[i] = btn;
+        if (!first_band_btn) first_band_btn = btn;
+    }
+
+    /* ATU tune checkbox */
+    int chk_y = grid_y + 2 * (btn_h + y_gap) + 16;
+    atu_chk = lv_checkbox_create(body);
+    lv_checkbox_set_text(atu_chk, "Run ATU tune sequence after QSY");
+    lv_obj_set_style_text_font(atu_chk, &sony_22, 0);
+    lv_obj_set_style_text_color(atu_chk, lv_color_white(), 0);
+    lv_obj_align(atu_chk, LV_ALIGN_TOP_MID, 0, chk_y);
+    lv_obj_add_event_cb(atu_chk, atu_chk_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_group_add_obj(keyboard_group, atu_chk);
+
+    /* Send button */
+    lv_obj_t *send_btn = make_action_btn(body, "Send",
+        send_js8_btn_cb, 0, chk_y + 40, 200, 48);
+    (void)send_btn;
+
+    if (first_band_btn)
+        lv_group_focus_obj(first_band_btn);
+
+    if (title_lbl)
+        lv_label_set_text(title_lbl, "Pick a band, optional ATU");
+}
+
+/* ─── footer-button callbacks ───────────────────────────────────────────── */
 
 static void btn_new_park_cb(struct button_item_t *btn) {
     (void)btn;
@@ -305,13 +605,22 @@ static void btn_new_park_cb(struct button_item_t *btn) {
 
 static void btn_refresh_cb(struct button_item_t *btn) {
     (void)btn;
-    populate_list();
+    show_list();
     msg_schedule_text_fmt("Refreshed");
 }
 
 static void btn_cancel_cb(struct button_item_t *btn) {
     (void)btn;
     dialog_destruct();
+}
+
+static void btn_back_cb(struct button_item_t *btn) {
+    (void)btn;
+    /* METHOD → LIST, BAND → METHOD */
+    if (view == VIEW_BAND)
+        show_method(selected_park);
+    else
+        show_list();
 }
 
 /* ─── textarea callbacks ────────────────────────────────────────────────── */
@@ -331,7 +640,15 @@ static bool textarea_ok_cb(void) {
 
     in_textarea = false;
     pota_parks_add(park);
-    do_spot(park);
+
+    /* Manually-entered parks go through the method picker too — same flow as
+     * picking from the list. The dialog body needs to come back first. */
+    if (dialog.obj)
+        lv_obj_clear_flag(dialog.obj, LV_OBJ_FLAG_HIDDEN);
+
+    strncpy(selected_park, park, sizeof(selected_park) - 1);
+    selected_park[sizeof(selected_park) - 1] = '\0';
+    show_method(selected_park);
     return true;
 }
 
@@ -347,6 +664,9 @@ static bool textarea_cancel_cb(void) {
 static void construct_cb(lv_obj_t *parent) {
     dialog.obj  = dialog_init(parent);
     in_textarea = false;
+    selected_park[0] = '\0';
+    js8_band_idx = -1;
+    js8_tune_atu = false;
 
     title_lbl = lv_label_create(dialog.obj);
     lv_label_set_text(title_lbl, "Loading...");
@@ -354,15 +674,19 @@ static void construct_cb(lv_obj_t *parent) {
     lv_obj_set_style_text_font(title_lbl, &sony_22, 0);
     lv_obj_align(title_lbl, LV_ALIGN_TOP_MID, 0, 6);
 
-    list = lv_list_create(dialog.obj);
-    lv_obj_set_size(list, LIST_W, LIST_H);
-    lv_obj_align(list, LV_ALIGN_TOP_MID, 0, TITLE_H);
-    lv_obj_set_scroll_dir(list, LV_DIR_VER);
-    lv_obj_set_style_bg_opa(list, LV_OPA_20, 0);
-    lv_obj_set_style_border_width(list, 0, 0);
-    lv_obj_set_style_pad_all(list, 4, 0);
+    /* Body container: a transparent obj whose children we swap on each view
+     * transition. Owning a body separate from dialog.obj means the title
+     * label survives lv_obj_clean(body) calls — view transitions don't
+     * have to rebuild the title each time. */
+    body = lv_obj_create(dialog.obj);
+    lv_obj_set_size(body, LIST_W, BODY_H);
+    lv_obj_align(body, LV_ALIGN_TOP_MID, 0, TITLE_H);
+    lv_obj_set_style_bg_opa(body, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(body, 0, 0);
+    lv_obj_set_style_pad_all(body, 0, 0);
+    lv_obj_clear_flag(body, LV_OBJ_FLAG_SCROLLABLE);
 
-    populate_list();
+    show_list();
 }
 
 static void destruct_cb(void) {
@@ -370,9 +694,14 @@ static void destruct_cb(void) {
         textarea_window_close();
         in_textarea = false;
     }
-    list        = NULL;
-    title_lbl   = NULL;
-    park_refs_n = 0;
+    body         = NULL;
+    title_lbl    = NULL;
+    atu_chk      = NULL;
+    park_refs_n  = 0;
+    js8_band_idx = -1;
+    js8_tune_atu = false;
+    selected_park[0] = '\0';
+    memset(band_btns, 0, sizeof(band_btns));
 }
 
 static void key_cb(lv_event_t *e) {
@@ -383,8 +712,19 @@ static void key_cb(lv_event_t *e) {
             if (in_textarea) {
                 textarea_window_close();
                 in_textarea = false;
+                /* If we were on the list view when New Park was tapped,
+                 * the dialog was hidden; show it again. */
+                if (dialog.obj)
+                    lv_obj_clear_flag(dialog.obj, LV_OBJ_FLAG_HIDDEN);
+                return;
             }
-            dialog_destruct();
+            /* Drill back through the views: BAND → METHOD → LIST → exit. */
+            if (view == VIEW_BAND)
+                show_method(selected_park);
+            else if (view == VIEW_METHOD)
+                show_list();
+            else
+                dialog_destruct();
             break;
 
         case LV_KEY_ENTER:
