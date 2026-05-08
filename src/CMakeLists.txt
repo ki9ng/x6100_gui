@@ -37,6 +37,7 @@ find_package(Threads REQUIRED)
 pkg_check_modules(deps REQUIRED IMPORTED_TARGET
     libcurl
     libnm dbus-glib-1 sqlite3 libpng libgps sndfile libudev libpulse libpulse-simple alsa
+    libx6100js8
 )
 
 
