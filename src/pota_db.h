@@ -51,3 +51,19 @@ int pota_db_count(void);
  * pota_db_load() must have been called first.
  */
 int pota_db_nearest(double lat, double lon, pota_db_entry_t *out, int n);
+
+/**
+ * Look up a park by reference (e.g. "US-0765"). Linear scan, ~25k parks
+ * is ~1 ms on the A33. Returns pointer into internal storage (do NOT free)
+ * or NULL if not found. The returned entry's dist_km field is undefined —
+ * callers needing distance should use pota_db_dist_km() against a known
+ * (lat, lon) fix.
+ */
+const pota_db_entry_t *pota_db_lookup(const char *ref);
+
+/**
+ * Compute equirectangular distance in km between (lat, lon) and `e`.
+ * Same approximation used by pota_db_nearest() — accurate to ~0.5%
+ * for separations under 500 km.
+ */
+float pota_db_dist_km(double lat, double lon, const pota_db_entry_t *e);

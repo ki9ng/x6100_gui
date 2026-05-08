@@ -139,3 +139,21 @@ int pota_db_nearest(double lat, double lon, pota_db_entry_t *out, int n) {
     memcpy(out, db, give * sizeof(pota_db_entry_t));
     return give;
 }
+
+/* ── lookup by ref ─────────────────────────────────────────────────────── */
+
+const pota_db_entry_t *pota_db_lookup(const char *ref) {
+    if (!loaded || !ref || !*ref) return NULL;
+    for (int i = 0; i < db_n; i++) {
+        if (strcmp(db[i].ref, ref) == 0)
+            return &db[i];
+    }
+    return NULL;
+}
+
+/* ── public distance helper ────────────────────────────────────────────── */
+
+float pota_db_dist_km(double lat, double lon, const pota_db_entry_t *e) {
+    if (!e) return 0.0f;
+    return dist_km(lat, lon, e->lat, e->lon);
+}

@@ -164,6 +164,31 @@ static void add_section_header(lv_obj_t *parent, const char *text) {
     lv_label_set_long_mode(hdr, LV_LABEL_LONG_CLIP);
 }
 
+/* Format a park row label: "REF        4.2 km  Park Name" or
+ * "REF        ? km    Park Name" if no GPS fix, or
+ * "REF        (unknown)" if not in the DB.
+ * Buffer must be at least 80 chars. */
+static void format_row(char *buf, size_t buflen, const char *ref,
+                       bool have_fix, double lat, double lon)
+{
+    const pota_db_entry_t *e = pota_db_lookup(ref);
+    if (!e) {
+        snprintf(buf, buflen, "%-10s  (unknown)", ref);
+        return;
+    }
+    if (!have_fix) {
+        snprintf(buf, buflen, "%-10s  ? km    %s", ref, e->name);
+        return;
+    }
+    float d = pota_db_dist_km(lat, lon, e);
+    if (d < 10.0f)
+        snprintf(buf, buflen, "%-10s  %4.1f km  %s", ref, d, e->name);
+    else if (d < 1000.0f)
+        snprintf(buf, buflen, "%-10s  %4.0f km  %s", ref, d, e->name);
+    else
+        snprintf(buf, buflen, "%-10s  >999 km  %s", ref, e->name);
+}
+
 static void populate_list(void) {
     if (!list) return;
 
@@ -171,6 +196,12 @@ static void populate_list(void) {
     park_refs_n = 0;
 
     lv_obj_t *first_btn = NULL;
+
+    /* Load DB unconditionally — RECENT rows want names too. The DB is small
+     * (~25k parks, ~900 KB resident) and load is idempotent after first call. */
+    bool have_db  = pota_db_load() && pota_db_ready();
+    double lat = 0.0, lon = 0.0;
+    bool have_fix = gps_get_fix(&lat, &lon);
 
     /* ── RECENT section ───────────────────────────────────────────────── */
     int recent_n = pota_parks_count();
@@ -183,7 +214,14 @@ static void populate_list(void) {
             strncpy(park_refs[park_refs_n], park, POTA_DB_REF_LEN - 1);
             park_refs[park_refs_n][POTA_DB_REF_LEN - 1] = '\0';
 
-            lv_obj_t *btn = add_park_row(list, park, park_refs_n);
+            char label[80];
+            if (have_db) {
+                format_row(label, sizeof(label), park, have_fix, lat, lon);
+            } else {
+                snprintf(label, sizeof(label), "%s", park);
+            }
+
+            lv_obj_t *btn = add_park_row(list, label, park_refs_n);
             if (!first_btn) first_btn = btn;
 
             park_refs_n++;
@@ -191,8 +229,7 @@ static void populate_list(void) {
     }
 
     /* ── NEARBY section ───────────────────────────────────────────────── */
-    double lat, lon;
-    if (gps_get_fix(&lat, &lon) && pota_db_load() && pota_db_ready()) {
+    if (have_fix && have_db) {
         static pota_db_entry_t nearby[MAX_NEARBY];
         int nearby_n = pota_db_nearest(lat, lon, nearby, MAX_NEARBY);
 
@@ -244,6 +281,7 @@ static void populate_list(void) {
             lv_label_set_text(title_lbl, "No parks — tap New Park");
     }
 }
+
 
 /* ─── button callbacks ──────────────────────────────────────────────────── */
 
