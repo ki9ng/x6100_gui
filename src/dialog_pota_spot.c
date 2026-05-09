@@ -665,9 +665,10 @@ static const char *atu_label_getter(void) {
 }
 
 static void atu_toggle_cb(struct button_item_t *btn) {
-    (void)btn;
     js8_tune_atu = !js8_tune_atu;
-    /* The button's label_fn is called on each redraw; nothing else to do. */
+    /* BTN_TEXT_FN with no .subj doesn't auto-redraw on state change.
+     * Force the footer button to re-call label_fn() so the text updates. */
+    if (btn) buttons_refresh(btn);
 }
 
 static void send_js8_btn_cb(lv_event_t *e) {
