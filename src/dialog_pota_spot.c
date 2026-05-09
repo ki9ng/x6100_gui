@@ -394,10 +394,15 @@ static void js8_do_spot(const char *park, uint32_t dial_hz, bool tune_atu) {
     }
 
     /* ─── now switch radio to USB-DIG so audio routing reaches the modulator.
-     * Use the low-level vfo_mode_set so we don't disturb the cfg subject
-     * (which would update the user's mode display & save to params).   ── */
-    x6100_vfo_t vfo = subject_get_int(cfg_cur.band->vfo.val);
-    x6100_control_vfo_mode_set(vfo, x6100_mode_usb_dig);
+     * Use subject_set_int (NOT the bare x6100_control_vfo_mode_set) so the
+     * subject observer chain actually sends the command to the radio AND
+     * updates whatever bookkeeping depends on the cfg state. The user's
+     * mode display will flicker briefly — accepted UX cost; mirrors what
+     * cfg_digital_load() does when the FT8 dialog enters its mode. */
+    subject_set_int(cfg_cur.mode, x6100_mode_usb_dig);
+    /* Give the subject observer + radio command queue a moment to settle
+     * before we start keying. */
+    usleep(100000);
 
     /* ─── slot align before first frame ──────────────────────────────── */
     {
@@ -443,7 +448,7 @@ static void js8_do_spot(const char *park, uint32_t dial_hz, bool tune_atu) {
     }
 
     /* ─── restore radio state ─────────────────────────────────────────── */
-    x6100_control_vfo_mode_set(vfo, saved_mode);
+    subject_set_int(cfg_cur.mode, saved_mode);
     radio_set_freq(saved_freq);
     free(play);
 
