@@ -120,7 +120,8 @@ static void list_btn_click_cb(lv_event_t *e);
 static void method_wifi_btn_cb(lv_event_t *e);
 static void method_js8_btn_cb(lv_event_t *e);
 static void band_btn_cb(lv_event_t *e);
-static void atu_chk_cb(lv_event_t *e);
+static const char *atu_label_getter(void);
+static void atu_toggle_cb(struct button_item_t *btn);
 static void send_js8_btn_cb(lv_event_t *e);
 
 /* ─── state ─────────────────────────────────────────────────────────────── */
@@ -136,7 +137,6 @@ static char selected_park[POTA_DB_REF_LEN] = "";
 /* User's JS8 band + ATU choice in VIEW_BAND. -1 = none selected. */
 static int  js8_band_idx = -1;
 static bool js8_tune_atu = false;
-static lv_obj_t *atu_chk = NULL;
 static lv_obj_t *band_btns[JS8_BANDS_N] = {0};
 
 /* Static park-ref storage so list-button user_data remains valid for the
@@ -154,10 +154,11 @@ static button_item_t btn_new     = { .type = BTN_TEXT, .label = "New Park",     
 static button_item_t btn_refresh = { .type = BTN_TEXT, .label = "Refresh\nNearby", .press = btn_refresh_cb  };
 static button_item_t btn_cncl    = { .type = BTN_TEXT, .label = "Cancel",          .press = btn_cancel_cb   };
 static button_item_t btn_back    = { .type = BTN_TEXT, .label = "Back",            .press = btn_back_cb     };
+static button_item_t btn_atu     = { .type = BTN_TEXT_FN, .label_fn = atu_label_getter, .press = atu_toggle_cb };
 
 static buttons_page_t page_list   = {{ &btn_new,  &btn_refresh, NULL, NULL, &btn_cncl }};
 static buttons_page_t page_method = {{ &btn_back, NULL,         NULL, NULL, &btn_cncl }};
-static buttons_page_t page_band   = {{ &btn_back, NULL,         NULL, NULL, &btn_cncl }};
+static buttons_page_t page_band   = {{ &btn_back, &btn_atu,     NULL, NULL, &btn_cncl }};
 
 /* ─── dialog descriptor ─────────────────────────────────────────────────── */
 
@@ -657,9 +658,16 @@ static void band_btn_cb(lv_event_t *e) {
             js8_bands[idx].label, js8_bands[idx].dial_hz / 1000);
 }
 
-static void atu_chk_cb(lv_event_t *e) {
-    lv_obj_t *cb = lv_event_get_target(e);
-    js8_tune_atu = lv_obj_has_state(cb, LV_STATE_CHECKED);
+static const char *atu_label_getter(void) {
+    static char buf[32];
+    sprintf(buf, "ATU Tune:\n%s", js8_tune_atu ? "On" : "Off");
+    return buf;
+}
+
+static void atu_toggle_cb(struct button_item_t *btn) {
+    (void)btn;
+    js8_tune_atu = !js8_tune_atu;
+    /* The button's label_fn is called on each redraw; nothing else to do. */
 }
 
 static void send_js8_btn_cb(lv_event_t *e) {
@@ -727,19 +735,14 @@ static void show_band(void) {
         if (!first_band_btn) first_band_btn = btn;
     }
 
-    /* ATU tune checkbox */
-    int chk_y = grid_y + 2 * (btn_h + y_gap) + 16;
-    atu_chk = lv_checkbox_create(body);
-    lv_checkbox_set_text(atu_chk, "Run ATU tune sequence after QSY");
-    lv_obj_set_style_text_font(atu_chk, &sony_22, 0);
-    lv_obj_set_style_text_color(atu_chk, lv_color_white(), 0);
-    lv_obj_align(atu_chk, LV_ALIGN_TOP_MID, 0, chk_y);
-    lv_obj_add_event_cb(atu_chk, atu_chk_cb, LV_EVENT_VALUE_CHANGED, NULL);
-    lv_group_add_obj(keyboard_group, atu_chk);
+    /* ATU tune is now an F-key footer button (btn_atu); see page_band.
+     * No body widget needed, which avoids the encoder edit-mode trap that
+     * the old LVGL checkbox had — F-keys are physical buttons not encoder. */
 
     /* Send button */
+    int send_y = grid_y + 2 * (btn_h + y_gap) + 32;
     lv_obj_t *send_btn = make_action_btn(body, "Send",
-        send_js8_btn_cb, 0, chk_y + 40, 200, 48);
+        send_js8_btn_cb, 0, send_y, 200, 48);
     (void)send_btn;
 
     if (first_band_btn)
@@ -862,7 +865,6 @@ static void destruct_cb(void) {
     }
     body         = NULL;
     title_lbl    = NULL;
-    atu_chk      = NULL;
     park_refs_n  = 0;
     js8_band_idx = -1;
     js8_tune_atu = false;
