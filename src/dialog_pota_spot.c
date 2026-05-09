@@ -48,8 +48,16 @@
 #include "textarea_window.h"
 #include "wifi.h"
 
+#include "audio.h"
+#include <x6100js8/x6100js8.h>
+
+#include <math.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 /* ─── tunables ──────────────────────────────────────────────────────────── */
 
@@ -185,30 +193,188 @@ static void wifi_do_spot(const char *park) {
     dialog_destruct();
 }
 
-/* JS8 spot stub. The actual JS8 encoder + modulator + scheduler is not yet
- * ported to the firmware (see projects/x6100-js8-engine and the design notes
- * in radio/js8call-pota-spot.md). For now: QSY to the chosen JS8 dial freq,
- * optionally fire the ATU tune sequence, and tell the user the engine isn't
- * live yet. The full path will replace this body. */
-static void js8_do_spot(const char *park, uint32_t dial_hz, bool tune_atu) {
-    msg_schedule_text_fmt("QSY to %u kHz", dial_hz / 1000);
-    radio_set_freq(dial_hz);
+/* ─── JS8 spot helpers ──────────────────────────────────────────────────── */
 
-    if (tune_atu) {
-        msg_schedule_text_fmt("Running ATU tune...");
-        radio_start_atu();
+/*
+ * Resample int16 PCM from src_rate to dst_rate using linear interpolation.
+ * Allocates a new buffer; caller must free(). Returns NULL on alloc failure.
+ *
+ * For 48000 → 44100 (ratio 160:147) linear interp introduces aliasing only
+ * near Nyquist, well outside JS8's narrow tone band (1500 Hz ± ~25 Hz). The
+ * audio is single-tone FSK so the perceptual quality is fine.
+ */
+static int16_t *js8_resample_linear(const int16_t *in, size_t in_n,
+                                    int src_rate, int dst_rate,
+                                    size_t *out_n)
+{
+    if (src_rate == dst_rate) {
+        int16_t *buf = malloc(in_n * sizeof(int16_t));
+        if (!buf) return NULL;
+        memcpy(buf, in, in_n * sizeof(int16_t));
+        *out_n = in_n;
+        return buf;
+    }
+    /* Output length: round-down. We're conservative — drop the last
+     * partial sample rather than read off the end. */
+    size_t n_out = (size_t)((double)(in_n - 1) * dst_rate / src_rate);
+    int16_t *out = malloc(n_out * sizeof(int16_t));
+    if (!out) return NULL;
+
+    double step = (double)src_rate / dst_rate;
+    double pos  = 0.0;
+
+    for (size_t wi = 0; wi < n_out; wi++) {
+        size_t i0 = (size_t)pos;
+        if (i0 + 1 >= in_n) { n_out = wi; break; }
+        double frac = pos - (double)i0;
+        out[wi] = (int16_t)lround(in[i0] * (1.0 - frac) + in[i0 + 1] * frac);
+        pos += step;
+    }
+    *out_n = n_out;
+    return out;
+}
+
+/*
+ * Sleep until the next JS8 Normal slot boundary (0/15/30/45 sec past the
+ * minute). Slot timing math borrowed from dialog_ft8.c::get_time_slot() so
+ * we stay consistent with the rest of the firmware's understanding of "now".
+ *
+ * The whole sleep happens in one nanosleep() call, with a final ~25 ms
+ * busy-wait to land precisely on the boundary. The UI thread is blocked
+ * during this time — the operator sees the message we posted just before
+ * calling this function, then the screen is frozen until TX starts. That's
+ * the same behavior dialog_ft8.c has during a TX cycle, so it's an accepted
+ * UX in this firmware.
+ */
+static void js8_wait_for_next_slot(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    float sec       = (float)(now.tv_sec % 60) + (float)now.tv_nsec / 1.0e9f;
+    float into_slot = fmodf(sec, 15.0f);
+    float wait_s    = 15.0f - into_slot;
+
+    /* If we're within 100 ms of a boundary, just go. */
+    if (wait_s >= 14.9f || wait_s <= 0.1f) return;
+
+    /* Coarse sleep to ~25 ms before the boundary. */
+    float coarse_s = wait_s - 0.025f;
+    if (coarse_s > 0.0f) {
+        struct timespec rqt;
+        rqt.tv_sec  = (time_t)coarse_s;
+        rqt.tv_nsec = (long)((coarse_s - (float)rqt.tv_sec) * 1.0e9f);
+        nanosleep(&rqt, NULL);
     }
 
-    /* TODO: once libx6100js8 lands, replace this stub with:
-     *   1. Build the on-air string:
-     *        "@APRSIS CMD :POTAGW   :KI9NG <park> <dial_hz/1000> <mode>"
-     *   2. JS8 encode + modulate to 48 kHz PCM in std::vector<int16_t>
-     *   3. Hand off to the slot-aligned scheduler (FT8 pattern, one
-     *      PTT cycle per JS8 frame, 5 frames for a typical spot).
-     *   4. Display per-frame TX progress; on completion, msg_schedule_text
-     *      "Spotted %s on JS8 — %u frames sent". */
-    msg_schedule_text_fmt("JS8 engine not yet ported — spot %s skipped", park);
+    /* Tight wait for the last few ms — busy-wait is fine here, we're not
+     * doing anything else and accuracy matters for slot alignment. */
+    while (1) {
+        clock_gettime(CLOCK_REALTIME, &now);
+        sec       = (float)(now.tv_sec % 60) + (float)now.tv_nsec / 1.0e9f;
+        into_slot = fmodf(sec, 15.0f);
+        if (into_slot < 0.025f || into_slot > 14.975f) break;
+        usleep(1000);
+    }
+}
 
+/*
+ * Real JS8 spot. Encodes a POTAGW-format @APRSIS CMD message via libx6100js8,
+ * resamples the resulting 48 kHz PCM to AUDIO_PLAY_RATE (44100), aligns to
+ * the next JS8 slot boundary, then keys PTT once and plays the entire
+ * message in one continuous burst (~63 sec for the typical 5-frame spot).
+ *
+ * Single PTT cycle by design — JS8 receivers sync per-frame on the Costas
+ * blocks regardless of where the frames land relative to the receiver's
+ * slot grid, so per-frame slot alignment isn't required. One PTT cycle
+ * per spot also avoids relay wear and click artifacts.
+ *
+ * The dialog stays alive throughout TX so the operator sees status updates;
+ * dialog_destruct() runs only after audio_play_wait() returns.
+ */
+static void js8_do_spot(const char *park, uint32_t dial_hz, bool tune_atu) {
+    /* ─── preflight ───────────────────────────────────────────────────── */
+    if (params.callsign.x[0] == '\0') {
+        msg_schedule_text_fmt("Set callsign in Settings first");
+        dialog_destruct();
+        return;
+    }
+
+    const char *mode     = pota_spot_mode_str();
+    int         freq_khz = (int)(dial_hz / 1000);
+
+    msg_schedule_text_fmt("JS8 encoding %s...", park);
+
+    /* ─── encode at 48 kHz ────────────────────────────────────────────── */
+    int16_t *raw   = NULL;
+    size_t   raw_n = 0;
+    int rc = x6100js8_encode_pota_spot(
+                params.callsign.x,
+                park,
+                freq_khz,
+                mode,
+                1500.0,           /* audio offset Hz (JS8 Normal default) */
+                &raw,
+                &raw_n);
+    if (rc != 0) {
+        msg_schedule_text_fmt("JS8 encode error %d", rc);
+        dialog_destruct();
+        return;
+    }
+
+    /* ─── resample 48000 → 44100 ──────────────────────────────────────── */
+    size_t   play_n = 0;
+    int16_t *play   = js8_resample_linear(raw, raw_n, 48000,
+                                          AUDIO_PLAY_RATE, &play_n);
+    free(raw);
+    if (!play) {
+        msg_schedule_text_fmt("JS8 alloc failed");
+        dialog_destruct();
+        return;
+    }
+
+    int n_frames    = (int)((play_n + 557423) / 557424); /* ~12.64s @44.1k */
+    float total_sec = (float)play_n / (float)AUDIO_PLAY_RATE;
+
+    /* ─── QSY + ATU tune ──────────────────────────────────────────────── */
+    radio_set_freq(dial_hz);
+    if (tune_atu) {
+        msg_schedule_text_fmt("ATU tune...");
+        radio_start_atu();
+        sleep(2);   /* ATU tune cycle takes ~1.5 s; give it a moment */
+    }
+
+    /* ─── slot align ──────────────────────────────────────────────────── */
+    /* Compute how long we'll be blocked: up to 15 sec slot wait + TX. The
+     * UI is unresponsive during this time, so post a single explanatory
+     * message before sleeping. */
+    {
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+        float sec       = (float)(now.tv_sec % 60) + (float)now.tv_nsec / 1.0e9f;
+        float into_slot = fmodf(sec, 15.0f);
+        float wait_s    = 15.0f - into_slot;
+        if (wait_s >= 14.9f) wait_s = 0.0f;
+        msg_schedule_text_fmt("JS8 %s %d frames %.0fs (wait %.0fs)",
+                              park, n_frames, total_sec, wait_s);
+    }
+    js8_wait_for_next_slot();
+
+    /* ─── PTT key, play, unkey ────────────────────────────────────────── */
+    radio_set_modem(true);
+    msg_schedule_text_fmt("JS8 TX %s...", park);
+
+    int16_t *ptr    = play;
+    size_t   remain = play_n;
+    while (remain > 0) {
+        size_t chunk = (remain < 2048) ? remain : 2048;
+        audio_play(ptr, chunk);
+        ptr    += chunk;
+        remain -= chunk;
+    }
+    audio_play_wait();
+    radio_set_modem(false);
+    free(play);
+
+    msg_schedule_text_fmt("Spotted %s on JS8", park);
     dialog_destruct();
 }
 
