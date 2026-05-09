@@ -280,6 +280,35 @@ static void js8_wait_for_next_slot(void) {
 }
 
 /*
+ * Wait for an ATU tune cycle to complete. radio_start_atu() just flips the
+ * radio state machine into RADIO_ATU_START; the actual command goes out on
+ * the next radio_tick(), the state progresses _START -> _WAIT -> _RUN, and
+ * eventually returns to RADIO_RX when the matching network has settled.
+ *
+ * Tune duration is highly variable on this radio — anywhere from ~1 sec
+ * for an easy match up to 30 sec for a difficult one. We poll the state
+ * up to a 35 sec hard cap.
+ *
+ * Returns true if tune completed, false on timeout.
+ */
+static bool js8_wait_for_atu_done(int max_seconds) {
+    /* Phase 1: wait for state to LEAVE RADIO_RX. Confirms the start cmd
+     * actually fired. Should happen within ~100 ms. */
+    for (int i = 0; i < 20; i++) {
+        if (radio_get_state() != RADIO_RX) break;
+        usleep(50000);
+    }
+
+    /* Phase 2: wait for state to RETURN to RADIO_RX. */
+    for (int i = 0; i < max_seconds * 10; i++) {
+        radio_state_t s = radio_get_state();
+        if (s == RADIO_RX) return true;
+        usleep(100000);
+    }
+    return false;
+}
+
+/*
  * Real JS8 spot. Encodes a POTAGW-format @APRSIS CMD message via libx6100js8
  * and transmits it as JS8Call would: per-frame PTT cycles aligned to 15-sec
  * slot boundaries, with the radio temporarily switched to USB-DIG mode for
@@ -347,18 +376,28 @@ static void js8_do_spot(const char *park, uint32_t dial_hz, bool tune_atu) {
     int32_t saved_mode = subject_get_int(cfg_cur.mode);
     radio_set_freq(dial_hz);
 
-    /* ─── switch radio to USB-DIG so audio routing reaches the modulator.
+    /* ─── ATU tune FIRST, in the user's current mode ─────────────────────
+     * Has to happen before the usb_dig switch because radio.c's ATU state
+     * machine calls recover_processing_audio_inputs() at completion, which
+     * ends by restoring the radio's mode to subject_get_int(cfg_cur.mode).
+     * If we switched mode before tuning, that restore would clobber it. */
+    if (tune_atu) {
+        msg_schedule_text_fmt("ATU tune...");
+        radio_start_atu();
+        if (!js8_wait_for_atu_done(35)) {
+            msg_schedule_text_fmt("ATU tune timeout");
+            radio_set_freq(saved_freq);
+            free(play);
+            dialog_destruct();
+            return;
+        }
+    }
+
+    /* ─── now switch radio to USB-DIG so audio routing reaches the modulator.
      * Use the low-level vfo_mode_set so we don't disturb the cfg subject
      * (which would update the user's mode display & save to params).   ── */
     x6100_vfo_t vfo = subject_get_int(cfg_cur.band->vfo.val);
     x6100_control_vfo_mode_set(vfo, x6100_mode_usb_dig);
-
-    /* ATU tune (in dig mode, low power, like recover_processing_audio_inputs) */
-    if (tune_atu) {
-        msg_schedule_text_fmt("ATU tune...");
-        radio_start_atu();
-        sleep(2);   /* tune cycle ~1.5 s */
-    }
 
     /* ─── slot align before first frame ──────────────────────────────── */
     {
