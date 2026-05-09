@@ -48,14 +48,7 @@
 #include "textarea_window.h"
 #include "wifi.h"
 
-#include "audio.h"
-#include <x6100js8/x6100js8.h>
-
-#include <math.h>
-#include <time.h>
-#include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 /* ─── tunables ──────────────────────────────────────────────────────────── */
@@ -192,150 +185,30 @@ static void wifi_do_spot(const char *park) {
     dialog_destruct();
 }
 
-/*
- * Resample int16 PCM from src_rate to dst_rate using linear interpolation.
- * Allocates a new buffer; caller must free().  Returns NULL on alloc failure.
- *
- * For the 48000→44100 case the ratio is 160/147 — irrational enough that a
- * polyphase filter would be ideal, but linear interp is inaudible on a
- * single-tone FSK signal and costs ~30 lines instead of 300.
- */
-static int16_t *resample_linear(const int16_t *in, size_t in_n,
-                                int src_rate, int dst_rate,
-                                size_t *out_n)
-{
-    if (src_rate == dst_rate) {
-        /* trivial copy */
-        int16_t *buf = malloc(in_n * sizeof(int16_t));
-        if (!buf) return NULL;
-        memcpy(buf, in, in_n * sizeof(int16_t));
-        *out_n = in_n;
-        return buf;
-    }
-    /* output length: ceil(in_n * dst_rate / src_rate) + 1 guard sample */
-    size_t n_out = (size_t)ceil((double)in_n * dst_rate / src_rate) + 1;
-    int16_t *out = malloc(n_out * sizeof(int16_t));
-    if (!out) return NULL;
-
-    double step = (double)src_rate / dst_rate;
-    double pos  = 0.0;
-    size_t wi   = 0;
-
-    while (wi < n_out) {
-        size_t i0 = (size_t)pos;
-        if (i0 + 1 >= in_n) break;
-        double frac = pos - (double)i0;
-        out[wi++] = (int16_t)lround(in[i0] * (1.0 - frac) + in[i0 + 1] * frac);
-        pos += step;
-    }
-    *out_n = wi;
-    return out;
-}
-
-/*
- * Block until the next JS8 Normal slot boundary (0, 15, 30, or 45 sec past
- * the minute).  Updates the status bar every second while waiting so the
- * operator knows what's happening.
- */
-static void wait_for_js8_slot(void) {
-    struct timespec ts;
-    for (;;) {
-        clock_gettime(CLOCK_REALTIME, &ts);
-        int sec = (int)(ts.tv_sec % 60);
-        int slot_sec = ((sec / 15) + 1) * 15;  /* next slot boundary */
-        if (slot_sec >= 60) slot_sec = 60;       /* top of minute */
-        int wait = slot_sec - sec;
-        if (wait <= 0) break;                    /* on a boundary right now */
-        msg_schedule_text_fmt("JS8: waiting %ds for slot...", wait);
-        usleep(500000);
-    }
-}
-
-/*
- * Play one frame's worth of samples (557424 at 44100 Hz = 12.64 sec) in
- * 2048-sample chunks.  PTT must already be up.
- */
-static void play_frame(int16_t *play, size_t frame_samples) {
-    int16_t *ptr = play;
-    size_t         remain = frame_samples;
-    while (remain > 0) {
-        size_t chunk = (remain < 2048) ? remain : 2048;
-        audio_play(ptr, chunk);
-        ptr    += chunk;
-        remain -= chunk;
-    }
-    audio_play_wait();
-}
-
+/* JS8 spot stub. The actual JS8 encoder + modulator + scheduler is not yet
+ * ported to the firmware (see projects/x6100-js8-engine and the design notes
+ * in radio/js8call-pota-spot.md). For now: QSY to the chosen JS8 dial freq,
+ * optionally fire the ATU tune sequence, and tell the user the engine isn't
+ * live yet. The full path will replace this body. */
 static void js8_do_spot(const char *park, uint32_t dial_hz, bool tune_atu) {
-    /* Guard: callsign must be set. */
-    if (params.callsign.x[0] == '\0') {
-        msg_schedule_text_fmt("Set callsign in Settings first");
-        return;
-    }
-
-    /* Derive mode string from current radio state (same helper WiFi path uses). */
-    const char *mode     = pota_spot_mode_str();
-    int         freq_khz = (int)(dial_hz / 1000);
-
-    /* Encode. Library outputs 48000 Hz mono int16 PCM. */
-    int16_t *raw   = NULL;
-    size_t   raw_n = 0;
-    int rc = x6100js8_encode_pota_spot(
-                params.callsign.x,
-                park,
-                freq_khz,
-                mode,
-                1500.0,
-                &raw,
-                &raw_n);
-
-    if (rc != 0) {
-        msg_schedule_text_fmt("JS8 encode error %d", rc);
-        return;
-    }
-
-    /* Resample 48000→44100 Hz. */
-    size_t   play_n = 0;
-    int16_t *play   = resample_linear(raw, raw_n, 48000, AUDIO_PLAY_RATE, &play_n);
-    free(raw);
-
-    if (!play) {
-        msg_schedule_text_fmt("JS8 resample alloc failed");
-        return;
-    }
-
-    /* JS8 Normal: 557424 samples per frame at 44100 Hz (12.64 sec).
-     * Each frame occupies one 15-second slot; PTT drops in the 2.36s gap. */
-    const size_t FRAME_SAMPLES = 557424;
-    int n_frames = (int)((play_n + FRAME_SAMPLES - 1) / FRAME_SAMPLES);
-
-    /* QSY before waiting so the radio is ready when the slot opens. */
+    msg_schedule_text_fmt("QSY to %u kHz", dial_hz / 1000);
     radio_set_freq(dial_hz);
-    msg_schedule_text_fmt("QSY %u kHz, %d JS8 frames", freq_khz, n_frames);
 
     if (tune_atu) {
         msg_schedule_text_fmt("Running ATU tune...");
         radio_start_atu();
     }
 
-    /* Transmit frame by frame, each aligned to a 15-second slot boundary. */
-    for (int f = 0; f < n_frames; f++) {
-        wait_for_js8_slot();
+    /* TODO: once libx6100js8 lands, replace this stub with:
+     *   1. Build the on-air string:
+     *        "@APRSIS CMD :POTAGW   :KI9NG <park> <dial_hz/1000> <mode>"
+     *   2. JS8 encode + modulate to 48 kHz PCM in std::vector<int16_t>
+     *   3. Hand off to the slot-aligned scheduler (FT8 pattern, one
+     *      PTT cycle per JS8 frame, 5 frames for a typical spot).
+     *   4. Display per-frame TX progress; on completion, msg_schedule_text
+     *      "Spotted %s on JS8 — %u frames sent". */
+    msg_schedule_text_fmt("JS8 engine not yet ported — spot %s skipped", park);
 
-        int16_t *frame_ptr = play + (f * FRAME_SAMPLES);
-        size_t frame_sz = FRAME_SAMPLES;
-        if ((size_t)(f * FRAME_SAMPLES + frame_sz) > play_n)
-            frame_sz = play_n - (size_t)(f * FRAME_SAMPLES);
-
-        msg_schedule_text_fmt("JS8 TX frame %d/%d...", f + 1, n_frames);
-        radio_set_modem(true);
-        play_frame(frame_ptr, frame_sz);
-        radio_set_modem(false);
-    }
-
-    free(play);
-    msg_schedule_text_fmt("%s spotted on JS8!", park);
     dialog_destruct();
 }
 
