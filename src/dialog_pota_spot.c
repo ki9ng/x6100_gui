@@ -426,8 +426,11 @@ static void js8_do_spot(const char *park, uint32_t dial_hz, bool tune_atu) {
 
         msg_schedule_text_fmt("JS8 TX %d/%d", i + 1, n_frames);
 
-        /* Key PTT for this frame, play, unkey. */
+        /* Key PTT for this frame, wait for PA/relay to settle, then play.
+         * JS8Call uses JS8A_START_DELAY_MS = 500 ms between PTT and audio
+         * start — receivers expect this silence before the Costas arrays. */
         radio_set_modem(true);
+        usleep(500000);   /* 500 ms PTT-to-audio delay, per JS8Call spec */
 
         int16_t *ptr    = play + off;
         size_t   remain = frame_samples;
