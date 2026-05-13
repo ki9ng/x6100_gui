@@ -100,7 +100,9 @@ The database is loaded lazily, falls back gracefully when there's no GPS fix (ev
 
 ### Option A — burn an SD card image (recommended for first time)
 
-Download `sdcard.img` from the [upstream Releases page](https://github.com/gdyuldin/x6100_gui/releases/latest) (this fork doesn't yet publish full images). Flash with [balenaEtcher](https://www.balena.io/etcher/) or Rufus. Insert and boot.
+Download `potaspotter-v1.0.0-sdcard.img.xz` from the [POTASpotter releases page](https://github.com/ki9ng/x6100_gui/releases/latest). Decompress (Etcher does this automatically; otherwise `xz -d potaspotter-v1.0.0-sdcard.img.xz`), verify the SHA256 against `SHA256SUMS` in the same release, then flash with [balenaEtcher](https://www.balena.io/etcher/), Rufus, or `dd`. Insert the SD card into the X6100 and power on. The image ships with the JS8 RF spotting feature enabled and the full POTA parks database (86 934 entries) baked in.
+
+The original upstream firmware (without the POTASpotter changes) is available at the [upstream Releases page](https://github.com/gdyuldin/x6100_gui/releases/latest).
 
 Then SSH in (the radio runs an OpenSSH server on its WiFi/USB-CDC interface, default root password `123`) and overlay this fork's binary — see Option B below.
 
