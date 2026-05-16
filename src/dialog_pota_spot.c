@@ -49,6 +49,7 @@
 #include "wifi.h"
 
 #include "audio.h"
+#include "tx_info.h"  /* for tx_info_refresh during the JS8 ALC feedback loop */
 #include <aether_radio/x6100_control/control.h>
 #include <aether_radio/x6100_control/low/control.h>
 #include <x6100js8/x6100js8.h>
@@ -67,6 +68,12 @@
 #define LIST_W          776    /* dialog body width */
 #define BODY_H          280    /* available vertical space below the title */
 #define TITLE_H         32
+
+/* JS8 TX power ceiling.
+ * Matches dialog_ft8.c::MAX_PWR — same continuous-duty PSK-like modulation,
+ * same thermal load on the X6100 finals. JS8 frames are 12.64 sec each,
+ * arguably WORSE for thermal than FT8's 12.6 sec, so we don't relax this. */
+#define JS8_MAX_PWR     5.0f
 
 /* ─── JS8 band table ────────────────────────────────────────────────────── */
 
@@ -349,6 +356,33 @@ static bool js8_wait_for_atu_done(int max_seconds) {
  * Audio path: AUDIO_PLAY_RATE PCM goes to PulseAudio "AIF1 DA0" sink, which
  * the radio's audio mixer routes to the digital input ONLY when the VFO
  * mode is one of the *_dig modes. Hence the temporary usb_dig switch.
+ *
+ * Gain stack (CRITICAL — see field test 2026-05-13, KI9NG transmitted with
+ * audible-but-not-decodable output until this was added):
+ *
+ *   libx6100js8 generates near-full-scale int16 PCM (s * 32767.0).
+ *   FT8 generates similar, then applies -16 dB or so before audio_play to
+ *   avoid clipping the DAC mixer. JS8 was previously sending raw full-scale
+ *   straight to PulseAudio. That clips the AIF1 DA0 mixer rail, which
+ *   produces IMD that's loud (so the speaker monitor sounds fine) but the
+ *   actual demodulated tones at the receiver are garbage.
+ *
+ *   Fix copied verbatim from dialog_ft8.c::tx_worker():
+ *     - base_gain_offset: hardware-rev-dependent calibration constant
+ *     - params.ft8_output_gain_offset: learned per-session offset (reused;
+ *       FT8 and JS8 share the same DAC path, the calibration applies to
+ *       both, and they're mutually exclusive in the dialog stack)
+ *     - audio_set_play_vol(gain + 6.0f): sets the ALSA mixer rail
+ *     - audio_gain_db per chunk: software pre-attenuation
+ *     - ALC feedback loop: every ~30 chunks, refresh ALC + measured power
+ *       and trim gain to reach target_pwr without clipping ALC
+ *     - audio_set_play_vol(restore): bring the ALSA rail back so RX monitor
+ *       doesn't blast the operator's ears
+ *
+ * The existing tx_info widget (src/tx_info.c) observes EVENT_RADIO_TX,
+ * which is fired by the flow thread when pack->flag.tx flips on. Calling
+ * radio_set_modem(true) is enough to make the power/ALC/SWR bars appear —
+ * no explicit setup needed here.
  */
 static void js8_do_spot(const char *park, uint32_t dial_hz, bool tune_atu) {
     /* ─── preflight ───────────────────────────────────────────────────── */
@@ -383,9 +417,31 @@ static void js8_do_spot(const char *park, uint32_t dial_hz, bool tune_atu) {
         return;
     }
 
-    /* ─── QSY ─────────────────────────────────────────────────────────── */
+    /* ─── save state for restoration ──────────────────────────────────── */
     int32_t saved_freq = subject_get_int(cfg_cur.fg_freq);
     int32_t saved_mode = subject_get_int(cfg_cur.mode);
+    float   saved_pwr  = subject_get_float(cfg.pwr.val);
+
+    /* Clamp TX power to JS8_MAX_PWR (5W). Same ceiling as FT8 — JS8 is
+     * continuous-duty PSK-like modulation, same thermal load on the finals. */
+    if (saved_pwr > JS8_MAX_PWR) {
+        radio_set_pwr(JS8_MAX_PWR);
+        msg_schedule_text_fmt("Power limited to %0.0fW for JS8", JS8_MAX_PWR);
+    }
+    float target_pwr = LV_MIN(saved_pwr, JS8_MAX_PWR);
+
+    /* Hardware-rev-dependent base gain offset (copied from FT8):
+     *   rev >= 3 firmware has true power control, so we just need a
+     *   constant pre-attenuation. Older firmware doesn't, so the offset
+     *   scales with target power. */
+    float base_gain_offset;
+    if (x6100_control_get_base_ver().rev >= 3) {
+        base_gain_offset = -9.4f;
+    } else {
+        base_gain_offset = -16.4f + log10f(target_pwr) * 10.0f;
+    }
+
+    /* ─── QSY ─────────────────────────────────────────────────────────── */
     radio_set_freq(dial_hz);
 
     /* ─── ATU tune FIRST, in the user's current mode ─────────────────────
@@ -399,6 +455,7 @@ static void js8_do_spot(const char *park, uint32_t dial_hz, bool tune_atu) {
         if (!js8_wait_for_atu_done(35)) {
             msg_schedule_text_fmt("ATU tune timeout");
             radio_set_freq(saved_freq);
+            radio_set_pwr(saved_pwr);
             x6100js8_msg_free(msg);
             dialog_destruct();
             return;
@@ -428,7 +485,16 @@ static void js8_do_spot(const char *park, uint32_t dial_hz, bool tune_atu) {
     }
     js8_wait_for_next_slot();
 
-    /* ─── per-frame TX loop ───────────────────────────────────────────── */
+    /* ─── gain stack: set ALSA mixer rail before first PTT ────────────── */
+    float gain_offset = base_gain_offset + params.ft8_output_gain_offset.x;
+    float play_gain_offset = audio_set_play_vol(gain_offset + 6.0f);
+    gain_offset -= play_gain_offset;
+
+    /* ─── per-frame TX loop with ALC feedback ─────────────────────────── */
+    uint8_t  alc_msg_id        = 0;       /* tx_info polling cursor */
+    float    prev_gain_offset  = gain_offset;
+    size_t   alc_loop_counter  = 0;       /* chunks since last ALC trim */
+
     for (int i = 0; i < n_frames; i++) {
         size_t          frame48_n = 0;
         const int16_t  *frame48   = x6100js8_msg_frame(msg, i, &frame48_n);
@@ -456,13 +522,46 @@ static void js8_do_spot(const char *park, uint32_t dial_hz, bool tune_atu) {
         radio_set_modem(true);
         usleep(X6100JS8_PTT_DELAY_MS * 1000);
 
-        const int16_t *ptr    = play;
-        size_t         remain = play_n;
+        int16_t *ptr    = play;
+        size_t   remain = play_n;
         while (remain > 0) {
             size_t chunk = (remain < 2048) ? remain : 2048;
-            audio_play((int16_t *)ptr, chunk);
+
+            /* ALC feedback: after ~30 chunks (~1.4 sec into the frame),
+             * sample ALC and measured power and trim gain. Same algorithm
+             * as dialog_ft8.c::get_correction(). */
+            if (alc_loop_counter > 30) {
+                float alc = 0.0f, pwr = 0.0f;
+                if (tx_info_refresh(&alc_msg_id, &alc, &pwr, NULL)) {
+                    float correction = 0.0f;
+                    if (alc > 0.5f) {
+                        correction = log10f(log10f(11.1f - alc)) * 20.0f - 0.38f;
+                    } else if (target_pwr - pwr > 0.5f) {
+                        correction = log10f(target_pwr / (pwr + 0.01f)) * 10.0f;
+                    }
+                    gain_offset += correction * 0.4f;
+                    if (gain_offset > 0.0f)         gain_offset = 0.0f;
+                    else if (gain_offset < -30.0f)  gain_offset = -30.0f;
+                }
+            }
+
+            /* Apply per-chunk software attenuation. If the gain changed
+             * since last chunk, smooth-ramp to avoid an audible click. */
+            if (gain_offset == prev_gain_offset) {
+                if (gain_offset != 0.0f) {
+                    audio_gain_db(ptr, chunk, gain_offset, ptr);
+                }
+            } else {
+                audio_gain_db_transition(ptr, chunk,
+                                         prev_gain_offset, gain_offset, ptr);
+                prev_gain_offset = gain_offset;
+            }
+
+            audio_play(ptr, chunk);
+
             ptr    += chunk;
             remain -= chunk;
+            alc_loop_counter++;
         }
         audio_play_wait();
         radio_set_modem(false);
@@ -476,9 +575,17 @@ static void js8_do_spot(const char *park, uint32_t dial_hz, bool tune_atu) {
         }
     }
 
-    /* ─── restore radio state ─────────────────────────────────────────── */
+    /* ─── persist the learned gain offset for next session ────────────── */
+    params_float_set(&params.ft8_output_gain_offset,
+                     gain_offset - base_gain_offset + play_gain_offset);
+
+    /* ─── restore radio + audio state ─────────────────────────────────── */
+    audio_set_play_vol(params.play_gain_db_f.x);
     subject_set_int(cfg_cur.mode, saved_mode);
     radio_set_freq(saved_freq);
+    if (saved_pwr > JS8_MAX_PWR) {
+        radio_set_pwr(saved_pwr);
+    }
     x6100js8_msg_free(msg);
 
     msg_schedule_text_fmt("Spotted %s on JS8", park);
