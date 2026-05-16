@@ -49,12 +49,14 @@
 #include "wifi.h"
 
 #include "audio.h"
-#include "tx_info.h"  /* for tx_info_refresh during the JS8 ALC feedback loop */
+#include "scheduler.h"  /* for marshalling dialog_destruct back to the LVGL thread */
+#include "tx_info.h"    /* for tx_info_refresh during the JS8 ALC feedback loop */
 #include <aether_radio/x6100_control/control.h>
 #include <aether_radio/x6100_control/low/control.h>
 #include <x6100js8/x6100js8.h>
 
 #include <math.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -335,6 +337,36 @@ static bool js8_wait_for_atu_done(int max_seconds) {
 }
 
 /*
+ * Called from the LVGL thread via scheduler_put_noargs. Tears down the
+ * dialog. We can't call dialog_destruct directly from the JS8 worker
+ * thread because LVGL is not thread-safe.
+ */
+static void js8_destruct_on_lvgl(void *unused) {
+    (void)unused;
+    dialog_destruct();
+}
+
+/*
+ * Parameters passed to the JS8 worker thread. Allocated by send_js8_btn_cb,
+ * owned by the worker, freed at thread exit. Keeps the callback non-blocking
+ * so LVGL can drain its event queue (notably EVENT_RADIO_TX which is what
+ * makes the power/SWR/ALC meter appear when keying — same flow FT8 uses
+ * from its decode_thread).
+ */
+typedef struct {
+    char     park[POTA_DB_REF_LEN];
+    uint32_t dial_hz;
+    bool     tune_atu;
+} js8_worker_args_t;
+
+static void *js8_worker_thread(void *p) {
+    js8_worker_args_t *a = (js8_worker_args_t *)p;
+    js8_do_spot(a->park, a->dial_hz, a->tune_atu);
+    free(a);
+    return NULL;
+}
+
+/*
  * Real JS8 spot. Encodes an APSPOT-format @APRSIS CMD message via libx6100js8
  * and transmits it as JS8Call would: per-frame PTT cycles aligned to 15-sec
  * slot boundaries, with the radio temporarily switched to USB-DIG mode for
@@ -388,7 +420,7 @@ static void js8_do_spot(const char *park, uint32_t dial_hz, bool tune_atu) {
     /* ─── preflight ───────────────────────────────────────────────────── */
     if (params.callsign.x[0] == '\0') {
         msg_schedule_text_fmt("Set callsign in Settings first");
-        dialog_destruct();
+        scheduler_put_noargs(js8_destruct_on_lvgl);
         return;
     }
 
@@ -405,7 +437,7 @@ static void js8_do_spot(const char *park, uint32_t dial_hz, bool tune_atu) {
                 1500.0, &msg);
     if (rc != 0 || !msg) {
         msg_schedule_text_fmt("JS8 encode error %d", rc);
-        dialog_destruct();
+        scheduler_put_noargs(js8_destruct_on_lvgl);
         return;
     }
 
@@ -413,7 +445,7 @@ static void js8_do_spot(const char *park, uint32_t dial_hz, bool tune_atu) {
     if (n_frames < 1) {
         msg_schedule_text_fmt("JS8 encoded 0 frames");
         x6100js8_msg_free(msg);
-        dialog_destruct();
+        scheduler_put_noargs(js8_destruct_on_lvgl);
         return;
     }
 
@@ -457,7 +489,7 @@ static void js8_do_spot(const char *park, uint32_t dial_hz, bool tune_atu) {
             radio_set_freq(saved_freq);
             radio_set_pwr(saved_pwr);
             x6100js8_msg_free(msg);
-            dialog_destruct();
+            scheduler_put_noargs(js8_destruct_on_lvgl);
             return;
         }
     }
@@ -589,7 +621,7 @@ static void js8_do_spot(const char *park, uint32_t dial_hz, bool tune_atu) {
     x6100js8_msg_free(msg);
 
     msg_schedule_text_fmt("Spotted %s on JS8", park);
-    dialog_destruct();
+    scheduler_put_noargs(js8_destruct_on_lvgl);
 }
 
 /* ─── list view ─────────────────────────────────────────────────────────── */
@@ -890,7 +922,37 @@ static void send_js8_btn_cb(lv_event_t *e) {
         msg_schedule_text_fmt("Pick a band first");
         return;
     }
-    js8_do_spot(selected_park, js8_bands[js8_band_idx].dial_hz, js8_tune_atu);
+
+    /* Run js8_do_spot on a worker pthread so the LVGL main thread keeps
+     * processing events during the multi-minute TX cycle. Without this,
+     * EVENT_RADIO_TX (sent by the radio thread via main_screen_notify_rx_tx)
+     * never reaches the tx_info widget because the LVGL queue stays full.
+     * Mirrors FT8: dialog_ft8.c spawns decode_thread for the same reason. */
+    js8_worker_args_t *args = malloc(sizeof(*args));
+    if (!args) {
+        msg_schedule_text_fmt("JS8 alloc failed");
+        return;
+    }
+    strncpy(args->park, selected_park, sizeof(args->park) - 1);
+    args->park[sizeof(args->park) - 1] = '\0';
+    args->dial_hz  = js8_bands[js8_band_idx].dial_hz;
+    args->tune_atu = js8_tune_atu;
+
+    pthread_t tid;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    int rc = pthread_create(&tid, &attr, js8_worker_thread, args);
+    pthread_attr_destroy(&attr);
+
+    if (rc != 0) {
+        free(args);
+        msg_schedule_text_fmt("JS8 thread spawn failed");
+        return;
+    }
+    /* Tell the operator the spot is in flight. The worker will keep
+     * posting status updates via msg_schedule_text_fmt. */
+    msg_schedule_text_fmt("JS8 starting...");
 }
 
 static void show_band(void) {
